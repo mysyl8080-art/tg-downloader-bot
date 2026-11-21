@@ -7,6 +7,12 @@ from yt_dlp.utils import DownloadError as YtDlpError
 MAX_BYTES = 1900 * 1024 * 1024  # hard abort: 1.9 GB
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 
+TG_LIMIT = 49 * 1024 * 1024
+
+def _vfmt(h):
+    return (f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/"
+            f"best[height<={h}]/best")
+
 class DownloadError(Exception):
     pass
 
@@ -22,12 +28,11 @@ def cleanup(result):
     if result and result.path:
         shutil.rmtree(os.path.dirname(result.path), ignore_errors=True)
 
-def _ytdlp(url, audio_only=False):
+def _ytdlp(url, audio_only=False, quality=None):
     tmp = _tmpdir()
     opts = {
         "outtmpl": os.path.join(tmp, "%(title).80s.%(ext)s"),
-        "format": ("bestaudio/best" if audio_only else
-                   "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"),
+        "format": ("bestaudio/best" if audio_only else _vfmt(quality or 1080)),
         "merge_output_format": None if audio_only else "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -35,10 +40,10 @@ def _ytdlp(url, audio_only=False):
         "socket_timeout": 30,
         "retries": 3,
         "http_headers": UA,
-        "max_filesize": MAX_BYTES,
+        "max_filesize": TG_LIMIT,
     }
     if audio_only:
-        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": str(quality or 192)}]
     try:
         with yt_dlp.YoutubeDL(opts) as y:
             info = y.extract_info(url, download=True)
@@ -47,7 +52,7 @@ def _ytdlp(url, audio_only=False):
         raise
     files = [os.path.join(tmp, f) for f in os.listdir(tmp) if not f.endswith(".part")]
     if not files:
-        raise DownloadError("yt-dlp finished but produced no file")
+        raise DownloadError("TOOBIG")
     path = max(files, key=os.path.getsize)
     title = (info.get("title") or "video").strip()
     ext = os.path.splitext(path)[1].lower()
@@ -87,11 +92,13 @@ def _direct(url):
         shutil.rmtree(tmp, ignore_errors=True)
         raise DownloadError(f"فشل التحميل المباشر: {e}")
 
-def download_url(url, audio_only=False):
+def download_url(url, audio_only=False, quality=None, direct=False):
     """Try yt-dlp first (social/media sites); fall back to direct HTTP download."""
     looks_direct = bool(re.search(r"\.[A-Za-z0-9]{1,5}([?#].*)?$", url.split("/")[-1]))
+    if direct:
+        return _direct(url)
     try:
-        return _ytdlp(url, audio_only)
+        return _ytdlp(url, audio_only, quality)
     except YtDlpError as e:
         msg = str(e)
         if "Unsupported URL" in msg or "no suitable InfoExtractor" in msg or looks_direct:

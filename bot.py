@@ -2,9 +2,9 @@
 import asyncio, logging, os, re, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from downloader import DownloadError, cleanup, download_url
 
@@ -22,7 +22,7 @@ HELP = (
     "أرسل لي أي رابط وسأحمّله وأرسله لك هنا.\n\n"
     "• فيديو من يوتيوب، تيك توك، إنستغرام، تويتر/X، فيسبوك ومئات المواقع\n"
     "• أو رابط ملف مباشر (PDF, ZIP, صور...)\n\n"
-    "الحد الأقصى 49 ميجا (حد تيليجرام للبوتات)."
+    "بعد إرسال الرابط اختر فيديو (360/480/720/1080) أو MP3 (128/192/320).\nالحد الأقصى 49 ميجا (حد تيليجرام للبوتات)."
 )
 
 def extract_url(text: str):
@@ -32,6 +32,21 @@ def extract_url(text: str):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP)
 
+import uuid
+
+def menu_kb(key):
+    rows = [
+        [InlineKeyboardButton("🎬 360p", callback_data=f"v|360|{key}"),
+         InlineKeyboardButton("🎬 480p", callback_data=f"v|480|{key}")],
+        [InlineKeyboardButton("🎬 720p", callback_data=f"v|720|{key}"),
+         InlineKeyboardButton("🎬 1080p", callback_data=f"v|1080|{key}")],
+        [InlineKeyboardButton("🎵 MP3 128", callback_data=f"a|128|{key}"),
+         InlineKeyboardButton("🎵 MP3 192", callback_data=f"a|192|{key}"),
+         InlineKeyboardButton("🎵 MP3 320", callback_data=f"a|320|{key}")],
+        [InlineKeyboardButton("📎 ملف مباشر (رابط ملف)", callback_data=f"d|0|{key}")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     text = msg.text or msg.caption or ""
@@ -39,15 +54,39 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not url:
         await msg.reply_text("أرسل رابطًا يبدأ بـ http أو https وسأحمّله لك.")
         return
-    audio_only = any(w in text for w in ("صوت", "mp3", "MP3", "audio"))
-    status = await msg.reply_text("⏳ جارٍ التحميل" + (" (صوت فقط)..." if audio_only else "..."))
+    key = uuid.uuid4().hex[:10]
+    ctx.bot_data[key] = url
+    if len(ctx.bot_data) > 500:
+        for k in list(ctx.bot_data)[:100]:
+            ctx.bot_data.pop(k, None)
+    await msg.reply_text("اختر الصيغة والجودة:", reply_markup=menu_kb(key), reply_to_message_id=msg.message_id)
+
+async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        kind, qual, key = q.data.split("|")
+    except ValueError:
+        return
+    url = ctx.bot_data.get(key)
+    if not url:
+        await q.edit_message_text("انتهت صلاحية الزر. أرسل الرابط مرة أخرى.")
+        return
+    msg = q.message
+    label = {"v": f"فيديو {qual}p", "a": f"MP3 {qual}", "d": "ملف مباشر"}[kind]
+    await q.edit_message_text(f"⏳ جارٍ التحميل ({label})...")
+    status = msg
     async with _sem:
         await ctx.bot.send_chat_action(msg.chat_id, ChatAction.UPLOAD_DOCUMENT)
         result = None
         try:
-            result = await asyncio.to_thread(download_url, url, audio_only)
+            result = await asyncio.to_thread(download_url, url, kind == "a", int(qual) or None, kind == "d")
         except DownloadError as e:
-            await status.edit_text(f"❌ {e}")
+            if str(e) == "TOOBIG":
+                await status.edit_text("❌ الملف أكبر من 49 ميجا (حد تيليجرام للبوتات). اختر جودة أقل أو MP3.",
+                                       reply_markup=menu_kb(key))
+            else:
+                await status.edit_text(f"❌ {e}")
             return
         except Exception:
             log.exception("download failed")
@@ -57,20 +96,21 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         size = os.path.getsize(result.path)
         if size > MAX_TG_BYTES:
             await status.edit_text(
-                f"❌ الملف كبير ({size/1024/1024:.0f} ميجا). الحد الأقصى للبوتات 49 ميجا.")
+                f"❌ الملف كبير ({size/1024/1024:.0f} ميجا). الحد الأقصى للبوتات 49 ميجا. اختر جودة أقل.",
+                reply_markup=menu_kb(key))
             return
         await status.edit_text("📤 جارٍ الإرسال...")
         title = result.title or "file"
         with open(result.path, "rb") as f:
             if result.path.lower().endswith((".mp3", ".m4a", ".ogg", ".wav", ".opus")):
-                await msg.reply_audio(f, caption=title[:1000], title=title[:64],
-                                      read_timeout=300, write_timeout=300)
-            elif result.is_video:
-                await msg.reply_video(f, caption=title[:1000], supports_streaming=True,
-                                      read_timeout=300, write_timeout=300)
-            else:
-                await msg.reply_document(f, caption=title[:1000],
+                await ctx.bot.send_audio(msg.chat_id, f, caption=title[:1000], title=title[:64],
                                          read_timeout=300, write_timeout=300)
+            elif result.is_video:
+                await ctx.bot.send_video(msg.chat_id, f, caption=title[:1000], supports_streaming=True,
+                                         read_timeout=300, write_timeout=300)
+            else:
+                await ctx.bot.send_document(msg.chat_id, f, caption=title[:1000],
+                                            read_timeout=300, write_timeout=300)
         await status.delete()
     except Exception:
         log.exception("send failed")
@@ -92,6 +132,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle))
+    app.add_handler(CallbackQueryHandler(on_choice))
     url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_URL")
     if url:
         # webhook mode (free web hosts sleep when idle; Telegram retries delivery)
@@ -112,10 +153,10 @@ def main():
                 log.info("selfcheck GET /tg: %s", e)
         threading.Thread(target=selfcheck, daemon=True).start()
         app.run_webhook(listen="0.0.0.0", port=port, url_path="tg", webhook_url=url.rstrip("/") + "/tg",
-                        secret_token=secret, allowed_updates=["message"])
+                        secret_token=secret, allowed_updates=["message", "callback_query"])
     else:
         log.info("bot starting (long polling)")
-        app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
+        app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
     main()
