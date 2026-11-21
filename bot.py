@@ -2,7 +2,7 @@
 import asyncio, logging, os, re, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Update, WebAppInfo
 from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -29,8 +29,17 @@ def extract_url(text: str):
     m = URL_RE.search(text or "")
     return m.group(0) if m else None
 
+MUSHAF_URL = os.environ.get("MUSHAF_URL", "https://almushaf.surge.sh/")
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📖 افتح المصحف", web_app=WebAppInfo(url=MUSHAF_URL))]])
+    await update.message.reply_text(HELP, reply_markup=kb)
+
+async def post_init(app):
+    try:
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="افتح المصحف", web_app=WebAppInfo(url=MUSHAF_URL)))
+    except Exception:
+        log.exception("set menu button failed")
 
 import uuid
 
@@ -145,7 +154,7 @@ def run_health_server():
 def main():
     if not (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_URL")):
         threading.Thread(target=run_health_server, daemon=True).start()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle))
     app.add_handler(CallbackQueryHandler(on_choice))
