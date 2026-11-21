@@ -10,6 +10,8 @@ from downloader import DownloadError, cleanup, download_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAX_TG_BYTES = 49 * 1024 * 1024  # Bot API upload cap
