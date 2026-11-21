@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from downloader import DownloadError, cleanup, download_url
+from downloader import DownloadError, cleanup, download_url, split_file, TG_LIMIT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -94,27 +94,43 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
     try:
         size = os.path.getsize(result.path)
-        if size > MAX_TG_BYTES:
-            await status.edit_text(
-                f"❌ الملف كبير ({size/1024/1024:.0f} ميجا). الحد الأقصى للبوتات 49 ميجا. اختر جودة أقل.",
-                reply_markup=menu_kb(key))
-            return
-        await status.edit_text("📤 جارٍ الإرسال...")
         title = result.title or "file"
-        with open(result.path, "rb") as f:
-            if result.path.lower().endswith((".mp3", ".m4a", ".ogg", ".wav", ".opus")):
-                await ctx.bot.send_audio(msg.chat_id, f, caption=title[:1000], title=title[:64],
-                                         read_timeout=300, write_timeout=300)
-            elif result.is_video:
-                await ctx.bot.send_video(msg.chat_id, f, caption=title[:1000], supports_streaming=True,
-                                         read_timeout=300, write_timeout=300)
-            else:
-                await ctx.bot.send_document(msg.chat_id, f, caption=title[:1000],
-                                            read_timeout=300, write_timeout=300)
+        is_media = result.path.lower().endswith((".mp3", ".m4a", ".ogg", ".wav", ".opus", ".mp4", ".mkv", ".webm", ".mov"))
+        if size > MAX_TG_BYTES:
+            await status.edit_text(f"✂️ الملف كبير ({size/1024/1024:.0f} ميجا). سأقسمه إلى أجزاء وأرسلها...")
+            try:
+                parts = await asyncio.to_thread(split_file, result.path)
+            except Exception:
+                log.exception("split failed")
+                await status.edit_text("❌ فشل تقسيم الملف. اختر جودة أقل.", reply_markup=menu_kb(key))
+                return
+        else:
+            parts = [result.path]
+        n = len(parts)
+        for i, p in enumerate(parts, 1):
+            await status.edit_text(f"📤 جارٍ الإرسال... ({i}/{n})" if n > 1 else "📤 جارٍ الإرسال...")
+            cap = (title if n == 1 else f"{title}\nجزء {i}/{n}")[:1000]
+            low = p.lower()
+            with open(p, "rb") as f:
+                if low.endswith((".mp3", ".m4a", ".ogg", ".wav", ".opus")):
+                    await ctx.bot.send_audio(msg.chat_id, f, caption=cap, title=title[:64],
+                                             read_timeout=300, write_timeout=300)
+                elif low.endswith((".mp4", ".mkv", ".webm", ".mov")):
+                    await ctx.bot.send_video(msg.chat_id, f, caption=cap, supports_streaming=True,
+                                             read_timeout=300, write_timeout=300)
+                else:
+                    await ctx.bot.send_document(msg.chat_id, f, caption=cap,
+                                                read_timeout=300, write_timeout=300)
+        if n > 1 and not is_media:
+            await ctx.bot.send_message(msg.chat_id,
+                "ℹ️ هذا ملف مقسّم. لدمج الأجزاء: على ويندوز افتح CMD وشغّل: copy /b *.001 الاسم_الأصلي — "
+                "وعلى الأندرويد/لينكس: cat *.0* > الاسم_الأصلي")
+        elif n > 1:
+            await ctx.bot.send_message(msg.chat_id, f"ℹ️ تم تقسيمه إلى {n} أجزاء، كل جزء يعمل لوحده بالترتيب.")
         await status.delete()
     except Exception:
         log.exception("send failed")
-        await status.edit_text("❌ تم التحميل لكن فشل الإرسال (ربما الملف كبير جدًا).")
+        await status.edit_text("❌ تم التحميل لكن فشل الإرسال.")
     finally:
         cleanup(result)
 

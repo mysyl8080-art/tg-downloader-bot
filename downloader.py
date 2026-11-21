@@ -40,7 +40,7 @@ def _ytdlp(url, audio_only=False, quality=None):
         "socket_timeout": 30,
         "retries": 3,
         "http_headers": UA,
-        "max_filesize": TG_LIMIT,
+        "max_filesize": MAX_BYTES,
     }
     if audio_only:
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": str(quality or 192)}]
@@ -112,3 +112,56 @@ def download_url(url, audio_only=False, quality=None, direct=False):
         if looks_direct:
             return _direct(url)
         raise DownloadError(f"خطأ غير متوقع: {e}")
+
+
+import subprocess, math
+
+PART_BYTES = 44 * 1024 * 1024
+
+def _duration(path):
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=nw=1:nk=1", path], capture_output=True, text=True, timeout=60).stdout
+        return float(out.strip())
+    except Exception:
+        return 0.0
+
+def split_file(path):
+    """Return a list of part paths each <= ~44 MB. Media is cut by time (each part plays alone);
+    other files are byte-split (.001, .002 ...)."""
+    size = os.path.getsize(path)
+    if size <= TG_LIMIT:
+        return [path]
+    base, ext = os.path.splitext(path)
+    outdir = os.path.dirname(path)
+    dur = _duration(path)
+    if dur > 0 and ext.lower() in (".mp4", ".mkv", ".webm", ".mov", ".mp3", ".m4a", ".ogg", ".opus", ".wav"):
+        parts = math.ceil(size / PART_BYTES) + 1
+        for _ in range(4):
+            seg = max(5, int(dur / parts))
+            for f in os.listdir(outdir):
+                if f.startswith("part_"):
+                    os.remove(os.path.join(outdir, f))
+            pat = os.path.join(outdir, "part_%03d" + ext)
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-c", "copy", "-map", "0",
+                            "-f", "segment", "-segment_time", str(seg), "-reset_timestamps", "1", pat],
+                           check=True, timeout=1200)
+            files = sorted(os.path.join(outdir, f) for f in os.listdir(outdir) if f.startswith("part_"))
+            if files and all(os.path.getsize(f) <= TG_LIMIT for f in files):
+                os.remove(path)
+                return files
+            parts = int(parts * 1.5) + 1
+    # byte split fallback
+    files = []
+    with open(path, "rb") as src:
+        i = 1
+        while True:
+            chunk = src.read(PART_BYTES)
+            if not chunk:
+                break
+            p = os.path.join(outdir, f"{os.path.basename(path)}.{i:03d}")
+            with open(p, "wb") as o:
+                o.write(chunk)
+            files.append(p); i += 1
+    os.remove(path)
+    return files
