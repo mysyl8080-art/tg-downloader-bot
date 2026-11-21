@@ -97,7 +97,20 @@ def main():
         # webhook mode (free web hosts sleep when idle; Telegram retries delivery)
         port = int(os.environ.get("PORT", "8080"))
         secret = os.environ.get("WEBHOOK_SECRET", BOT_TOKEN.split(":")[-1][:24])
-        log.info("bot starting (webhook %s)", url)
+        log.info("bot starting (webhook %s) PORT=%s", url, os.environ.get("PORT"))
+        def selfcheck():
+            import time, socket, urllib.request
+            time.sleep(8)
+            try:
+                s_ = socket.create_connection(("127.0.0.1", port), 3); s_.close(); log.info("selfcheck: port %s open", port)
+            except Exception as e:
+                log.info("selfcheck: port %s closed: %s", port, e)
+            try:
+                r = urllib.request.urlopen("http://127.0.0.1:%s/tg" % port, timeout=5)
+                log.info("selfcheck GET /tg %s", r.status)
+            except Exception as e:
+                log.info("selfcheck GET /tg: %s", e)
+        threading.Thread(target=selfcheck, daemon=True).start()
         app.run_webhook(listen="0.0.0.0", port=port, url_path="tg", webhook_url=url.rstrip("/") + "/tg",
                         secret_token=secret, allowed_updates=["message"])
     else:
