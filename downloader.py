@@ -22,12 +22,13 @@ def cleanup(result):
     if result and result.path:
         shutil.rmtree(os.path.dirname(result.path), ignore_errors=True)
 
-def _ytdlp(url):
+def _ytdlp(url, audio_only=False):
     tmp = _tmpdir()
     opts = {
         "outtmpl": os.path.join(tmp, "%(title).80s.%(ext)s"),
-        "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-        "merge_output_format": "mp4",
+        "format": ("bestaudio/best" if audio_only else
+                   "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"),
+        "merge_output_format": None if audio_only else "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -36,6 +37,8 @@ def _ytdlp(url):
         "http_headers": UA,
         "max_filesize": MAX_BYTES,
     }
+    if audio_only:
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
     try:
         with yt_dlp.YoutubeDL(opts) as y:
             info = y.extract_info(url, download=True)
@@ -49,6 +52,10 @@ def _ytdlp(url):
     title = (info.get("title") or "video").strip()
     ext = os.path.splitext(path)[1].lower()
     is_video = ext in (".mp4", ".mkv", ".webm", ".mov", ".avi")
+    if audio_only and ext != ".mp3":
+        cand = [f for f in files if f.endswith(".mp3")]
+        if cand:
+            path = cand[0]
     return Result(path, title, is_video, "yt-dlp")
 
 def _direct(url):
@@ -80,11 +87,11 @@ def _direct(url):
         shutil.rmtree(tmp, ignore_errors=True)
         raise DownloadError(f"فشل التحميل المباشر: {e}")
 
-def download_url(url):
+def download_url(url, audio_only=False):
     """Try yt-dlp first (social/media sites); fall back to direct HTTP download."""
     looks_direct = bool(re.search(r"\.[A-Za-z0-9]{1,5}([?#].*)?$", url.split("/")[-1]))
     try:
-        return _ytdlp(url)
+        return _ytdlp(url, audio_only)
     except YtDlpError as e:
         msg = str(e)
         if "Unsupported URL" in msg or "no suitable InfoExtractor" in msg or looks_direct:

@@ -37,12 +37,13 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not url:
         await msg.reply_text("أرسل رابطًا يبدأ بـ http أو https وسأحمّله لك.")
         return
-    status = await msg.reply_text("⏳ جارٍ التحميل...")
+    audio_only = any(w in text for w in ("صوت", "mp3", "MP3", "audio"))
+    status = await msg.reply_text("⏳ جارٍ التحميل" + (" (صوت فقط)..." if audio_only else "..."))
     async with _sem:
         await ctx.bot.send_chat_action(msg.chat_id, ChatAction.UPLOAD_DOCUMENT)
         result = None
         try:
-            result = await asyncio.to_thread(download_url, url)
+            result = await asyncio.to_thread(download_url, url, audio_only)
         except DownloadError as e:
             await status.edit_text(f"❌ {e}")
             return
@@ -59,7 +60,10 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("📤 جارٍ الإرسال...")
         title = result.title or "file"
         with open(result.path, "rb") as f:
-            if result.is_video:
+            if result.path.lower().endswith((".mp3", ".m4a", ".ogg", ".wav", ".opus")):
+                await msg.reply_audio(f, caption=title[:1000], title=title[:64],
+                                      read_timeout=300, write_timeout=300)
+            elif result.is_video:
                 await msg.reply_video(f, caption=title[:1000], supports_streaming=True,
                                       read_timeout=300, write_timeout=300)
             else:
@@ -81,12 +85,22 @@ def run_health_server():
     HTTPServer(("0.0.0.0", port), H).serve_forever()
 
 def main():
-    threading.Thread(target=run_health_server, daemon=True).start()
+    if not (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_URL")):
+        threading.Thread(target=run_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle))
-    log.info("bot starting (long polling)")
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
+    url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_URL")
+    if url:
+        # webhook mode (free web hosts sleep when idle; Telegram retries delivery)
+        port = int(os.environ.get("PORT", "8080"))
+        secret = os.environ.get("WEBHOOK_SECRET", BOT_TOKEN.split(":")[-1][:24])
+        log.info("bot starting (webhook %s)", url)
+        app.run_webhook(listen="0.0.0.0", port=port, url_path="tg", webhook_url=url.rstrip("/") + "/tg",
+                        secret_token=secret, allowed_updates=["message"])
+    else:
+        log.info("bot starting (long polling)")
+        app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
 
 if __name__ == "__main__":
     main()
