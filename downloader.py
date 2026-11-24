@@ -1,5 +1,6 @@
 """Download engine: yt-dlp for social/media sites, plain HTTP for direct file links."""
-import os, re, shutil, tempfile
+import os, re, shutil, tempfile, subprocess
+from urllib.parse import urlparse
 import requests
 import yt_dlp
 from yt_dlp.utils import DownloadError as YtDlpError
@@ -42,6 +43,10 @@ def _ytdlp(url, audio_only=False, quality=None):
         "http_headers": UA,
         "max_filesize": MAX_BYTES,
     }
+    if os.environ.get("PROXY_URL"):
+        opts["proxy"] = os.environ["PROXY_URL"]
+    if _is_tiktok(url) and _tiktok_cookies():
+        opts["cookiefile"] = _tiktok_cookies()
     if audio_only:
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": str(quality or 192)}]
     try:
@@ -62,6 +67,91 @@ def _ytdlp(url, audio_only=False, quality=None):
         if cand:
             path = cand[0]
     return Result(path, title, is_video, "yt-dlp")
+
+TIKTOK_RE = re.compile(r"(^|\.)tiktok\.com$")
+SOCIAL_HTML_HOSTS = ("tiktok.com", "instagram.com", "facebook.com", "fb.watch", "twitter.com", "x.com", "youtube.com", "youtu.be")
+
+def _host(url):
+    return (urlparse(url).hostname or "").lower()
+
+def _is_tiktok(url):
+    return bool(TIKTOK_RE.search(_host(url)))
+
+def _is_social(url):
+    h = _host(url)
+    return any(h == d or h.endswith("." + d) for d in SOCIAL_HTML_HOSTS)
+
+def _resolve_tiktok(url):
+    """Follow vt./vm. short links and turn /photo/ID into /video/ID (yt-dlp only knows /video/)."""
+    if _is_tiktok(url) and _host(url) not in ("www.tiktok.com", "tiktok.com"):
+        try:
+            r = requests.get(url, headers=UA, allow_redirects=True, timeout=(10, 20), stream=True)
+            url = r.url
+            r.close()
+        except requests.RequestException:
+            pass
+    return re.sub(r"/photo/(\d+)", r"/video/\1", url) if _is_tiktok(url) else url
+
+def _tiktok_cookies():
+    p = os.environ.get("TIKTOK_COOKIES_FILE")
+    return p if p and os.path.exists(p) else None
+
+def _tikwm(url, audio_only=False):
+    """Fallback for TikTok videos and photo slideshows via the public tikwm API."""
+    tmp = _tmpdir()
+    try:
+        r = requests.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}, headers=UA, timeout=30)
+        d = r.json().get("data") or {}
+        title = (d.get("title") or "tiktok").strip()[:80] or "tiktok"
+        music = d.get("music")
+        images = d.get("images") or []
+        def get(u, name):
+            p = os.path.join(tmp, name)
+            with requests.get(u, headers=UA, stream=True, timeout=(15, 60)) as rr:
+                rr.raise_for_status()
+                with open(p, "wb") as f:
+                    for c in rr.iter_content(1024 * 256):
+                        f.write(c)
+            return p
+        if images:  # photo slideshow -> mp4 (or mp3 if audio only)
+            audio = get(music, "music.mp3") if music else None
+            if audio_only and audio:
+                return Result(audio, title, False, "tikwm")
+            imgs = [get(u, f"img_{i:03d}.jpg") for i, u in enumerate(images)]
+            per = 3
+            lst = os.path.join(tmp, "list.txt")
+            with open(lst, "w") as f:
+                for p in imgs:
+                    f.write(f"file '{p}'\nduration {per}\n")
+                f.write(f"file '{imgs[-1]}'\n")
+            out = os.path.join(tmp, "slideshow.mp4")
+            cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst]
+            if audio:
+                cmd += ["-i", audio, "-shortest"]
+            cmd += ["-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+                    "-r", "25", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", out]
+            subprocess.run(cmd, check=True, timeout=600)
+            return Result(out, title, True, "tikwm")
+        play = d.get("hdplay") or d.get("play")
+        if audio_only and music:
+            return Result(get(music, "music.mp3"), title, False, "tikwm")
+        if play:
+            return Result(get(play, "video.mp4"), title, True, "tikwm")
+        raise DownloadError("تيك توك رفض التحميل من الخادم، جرّب لينك تاني")
+    except DownloadError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise DownloadError("تيك توك رفض التحميل من الخادم، جرّب لينك تاني")
+
+def _tiktok(url, audio_only=False, quality=None):
+    orig = url
+    url = _resolve_tiktok(url)
+    try:
+        return _ytdlp(url, audio_only, quality)
+    except Exception:
+        return _tikwm(url, audio_only)
 
 def _direct(url):
     tmp = _tmpdir()
@@ -97,11 +187,15 @@ def download_url(url, audio_only=False, quality=None, direct=False):
     looks_direct = bool(re.search(r"\.[A-Za-z0-9]{1,5}([?#].*)?$", url.split("/")[-1]))
     if direct:
         return _direct(url)
+    if _is_tiktok(url):
+        return _tiktok(url, audio_only, quality)
     try:
         return _ytdlp(url, audio_only, quality)
     except YtDlpError as e:
         msg = str(e)
         if "Unsupported URL" in msg or "no suitable InfoExtractor" in msg or looks_direct:
+            if _is_social(url) and not looks_direct:
+                raise DownloadError("الموقع ده مش مدعوم أو اللينك مش فيديو")
             return _direct(url)
         if "Sign in to confirm" in msg or "HTTP Error 403" in msg:
             raise DownloadError("الموقع حظر التحميل من الخادم (حماية ضد الروبوتات). جرّب رابطًا آخر.")
