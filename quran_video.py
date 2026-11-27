@@ -3,15 +3,23 @@ import hashlib
 import math
 import os
 import subprocess
+import shutil
+import logging
+
+log = logging.getLogger("quran_video")
 
 import requests
 
 from quran_meta import RECITERS, AUDIO_URL
-from quran_render import render_base, render_word_overlays, particle_paths
+from PIL import Image
+
+from quran_bg import make_layers
+from quran_render import render_base, render_word_overlays
 from quran_chat import audio_bars, render_chat_base, render_player_patch
 
 W, H = 1080, 1920
 FPS = 24
+STRIP_FPS = 8
 MAX_SECONDS = 60
 
 CACHE = os.environ.get("QV_CACHE", "/tmp/quran_video_cache")
@@ -67,48 +75,69 @@ def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid,
     base_p = os.path.join(work, f"base_{tag}.png")
     _p, light = render_base(reciter_ar, surah, a1, a2, style, solid, base_p)
     words = render_word_overlays(surah, ayah, a1, dur, light, work, tag)
-    far_p, near_p, rays_p = particle_paths(style, solid, work)
+    word_imgs = [(Image.open(p).copy(), x, y, t, f) for (p, x, y, t, f) in words]
 
-    inputs = [base_p, far_p, near_p]
-    if rays_p:
-        inputs.append(rays_p)
-    w0 = len(inputs)
-    inputs += [wp for (wp, _x, _y, _t, _f) in words]
-    inputs.append(apath)
-    ai = len(inputs) - 1
+    _b, far, near, rays, _l = make_layers(style, solid)
+    far = far.crop((0, 0, W + int(MAX_SECONDS * 4) + 8, H))
+    near = near.crop((0, 0, W + int(MAX_SECONDS * 7) + 8, H))
+    if rays is not None:
+        rays = rays.crop((0, 0, W + 60, H))
 
-    g = []
-    g.append(f"[0:v]scale={W}:{H},zoompan=z='min(1+0.00012*on,1.07)':"
-             f"x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H}:fps={FPS}[bg]")
-    g.append("[bg][1:v]overlay=x=-t*4:y=0[v1]")
-    g.append("[v1][2:v]overlay=x=-t*7:y=0[v2]")
-    cur = "v2"
-    if rays_p:
-        g.append(f"[{cur}][3:v]overlay=x='t*1.5-40':y=0[v3]")
-        cur = "v3"
-    for k, (_p, x, y, t, fade) in enumerate(words):
-        g.append(f"[{w0+k}:v]format=rgba,fade=t=in:st={t}:d={fade}:alpha=1[wk{k}]")
-        nxt = f"v{k+4}"
-        g.append(f"[{cur}][wk{k}]overlay={x}:{y}:enable='gte(t,{t})'[{nxt}]")
-        cur = nxt
-    g.append(f"[{cur}]fade=t=in:st=0:d=0.4,fade=t=out:st={max(0.0,dur-0.4):.2f}:d=0.4,"
-             f"format=yuv420p[vout]")
+    def strip_frames():
+        n = max(1, int(round(dur * STRIP_FPS)))
+        for k in range(n):
+            t = k / STRIP_FPS
+            frame = Image.new("RGBA", (W, H))
+            frame.paste(far, (-int(t * 4), 0), far)
+            frame.paste(near, (-int(t * 7), 0), near)
+            if rays is not None:
+                frame.paste(rays, (int(t * 1.5) - 40, 0), rays)
+            for img, x, y, tk, fade in word_imgs:
+                a = (t - tk) / fade
+                if a >= 1:
+                    frame.paste(img, (x, y), img)
+                elif a > 0:
+                    tmp = img.copy()
+                    tmp.putalpha(img.getchannel("A").point(lambda v: int(v * a)))
+                    frame.paste(tmp, (x, y), tmp)
+            yield frame.tobytes()
+
     script = os.path.join(work, f"filter_{tag}.txt")
     with open(script, "w") as f:
-        f.write(";\n".join(g))
+        f.write(
+            f"[0:v]loop=loop=-1:size=1,fps={FPS},scale={W}:{H},"
+            f"zoompan=z='min(1+0.00012*on,1.07)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H},"
+            f"format=yuv420p[bg];\n"
+            f"[bg][1:v]overlay=0:0:format=yuv420[v1];\n"
+            f"[v1]fade=t=in:st=0:d=0.4,fade=t=out:st={max(0.0, dur-0.4):.2f}:d=0.4,null[vout]")
 
     seg = os.path.join(work, f"seg_{tag}.mp4")
-    cmd = ["ffmpeg", "-y"]
-    for i, p in enumerate(inputs):
-        if i == ai:
-            cmd += ["-i", p]
-        else:
-            cmd += ["-loop", "1", "-framerate", str(FPS), "-i", p]
-    cmd += ["-filter_complex_script", script, "-map", "[vout]", "-map", f"{ai}:a",
-            "-af", _finish(seg, dur),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg]
-    _run(cmd)
+    errp = os.path.join(work, f"err_{tag}.log")
+    cmd = ["ffmpeg", "-y", "-threads", "2", "-filter_threads", "2", "-filter_complex_threads", "2",
+           "-i", base_p,
+           "-thread_queue_size", "4", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-framerate", str(STRIP_FPS),
+           "-i", "pipe:0",
+           "-i", apath,
+           "-filter_complex_script", script, "-map", "[vout]", "-map", "2:a",
+           "-af", _finish(seg, dur),
+           "-c:v", "libx264", "-preset", "superfast", "-crf", "21",
+           "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg]
+    with open(errp, "wb") as errf:
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errf)
+        try:
+            for fr in strip_frames():
+                p.stdin.write(fr)
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            rc = p.wait(timeout=900)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            raise VideoError("ffmpeg", "timeout")
+    if rc != 0:
+        with open(errp, "r", errors="replace") as f:
+            raise VideoError("ffmpeg", f.read()[-400:])
     return seg
 
 
@@ -123,20 +152,20 @@ def build_chat_segment(work, tag, surah, ayah, a1, a2, apath, dur):
         render_player_patch(bars, min(1.0, t / dur), max(0.0, dur - t), geom,
                             os.path.join(work, f"cp_{tag}_{k:03d}.png"), playing=(k > 0))
     strip = os.path.join(work, f"strip_{tag}.mov")
-    _run(["ffmpeg", "-y", "-framerate", "2", "-i", os.path.join(work, f"cp_{tag}_%03d.png"),
+    _run(["ffmpeg", "-y", "-threads", "2", "-i", os.path.join(work, f"cp_{tag}_%03d.png"),
           "-frames:v", str(steps), "-c:v", "qtrle", strip])
 
     seg = os.path.join(work, f"seg_{tag}.mp4")
     script = os.path.join(work, f"filter_{tag}.txt")
     with open(script, "w") as f:
-        f.write(f"[0:v][1:v]overlay=0:0:format=auto,"
+        f.write(f"[0:v]loop=loop=-1:size=1,fps={FPS},format=yuv420p[bg];[bg][1:v]overlay=0:0:format=yuv420,"
                 f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(0.0,dur-0.3):.2f}:d=0.3,"
-                f"format=yuv420p[vout]")
-    _run(["ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS), "-i", base_p,
+                f"null[vout]")
+    _run(["ffmpeg", "-y", "-threads", "2", "-filter_threads", "2", "-filter_complex_threads", "2", "-i", base_p,
           "-i", strip, "-i", apath,
           "-filter_complex_script", script, "-map", "[vout]", "-map", "2:a",
           "-af", _finish(seg, dur),
-          "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+          "-c:v", "libx264", "-preset", "superfast", "-crf", "21",
           "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg])
     return seg
 
@@ -162,8 +191,12 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
     if os.path.exists(final) and os.path.getsize(final) > 10000:
         return final, total
 
+    for stale in os.listdir(CACHE):
+        if stale.startswith("w_"):
+            shutil.rmtree(os.path.join(CACHE, stale), ignore_errors=True)
     work = os.path.join(CACHE, f"w_{key}")
     os.makedirs(work, exist_ok=True)
+    log.info("render start reciter=%s surah=%s %s-%s style=%s dur=%.1f", reciter, surah, a1, a2, style, total)
     segs = []
     for i, (ayah, apath, dur) in enumerate(audios):
         if style == "chat":
@@ -177,13 +210,17 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
 
     if len(segs) == 1:
         os.replace(segs[0], final)
+        shutil.rmtree(work, ignore_errors=True)
+        log.info("render done %s (%.1fs, %dKB)", final, total, os.path.getsize(final) // 1024)
     else:
         lst = os.path.join(work, "list.txt")
         with open(lst, "w") as f:
             for s in segs:
                 f.write(f"file '{s}'\n")
-        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst,
+        _run(["ffmpeg", "-y", "-threads", "2", "-f", "concat", "-safe", "0", "-i", lst,
               "-c", "copy", "-movflags", "+faststart", final])
+    shutil.rmtree(work, ignore_errors=True)
+    log.info("render done %s (%.1fs, %dKB)", final, total, os.path.getsize(final) // 1024)
     return final, total
 
 

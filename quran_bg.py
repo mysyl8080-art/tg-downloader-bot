@@ -57,7 +57,7 @@ def _noise(img, amount=6):
 
 def _beams(color, origin, angles, width=130, alpha=26):
     """Soft light beams fanning from an origin point, on transparent canvas."""
-    layer = Image.new("RGBA", (W * 2, H * 2), (0, 0, 0, 0))
+    layer = Image.new("RGBA", (W + 480, H + 480), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     ox, oy = origin
     for a in angles:
@@ -69,7 +69,7 @@ def _beams(color, origin, angles, width=130, alpha=26):
                    (ox + dx * 2600 + px_ * width * 3, oy + dy * 2600 + py_ * width * 3)],
                   fill=color + (alpha,))
     layer = layer.filter(ImageFilter.GaussianBlur(60))
-    return layer.crop((W // 2, H // 2, W // 2 + W, H // 2 + H))
+    return layer.crop((240, 240, 240 + W, 240 + H))
 
 
 def _bokeh_layer(seed, count, rmin, rmax, alpha, colors, warm=False):
