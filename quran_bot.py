@@ -22,7 +22,8 @@ def _qv(ctx):
 
 
 def style_kb():
-    rows = [[InlineKeyboardButton(f"🌌 {STYLE_NAMES['night']}", callback_data="qb|night")],
+    rows = [[InlineKeyboardButton(f"💬 {STYLE_NAMES['chat']}", callback_data="qb|chat")],
+            [InlineKeyboardButton(f"🌌 {STYLE_NAMES['night']}", callback_data="qb|night")],
             [InlineKeyboardButton(f"🕌 {STYLE_NAMES['ornament']}", callback_data="qb|ornament")],
             [InlineKeyboardButton(f"🌅 {STYLE_NAMES['nature']}", callback_data="qb|nature")],
             [InlineKeyboardButton(f"🎨 {STYLE_NAMES['solid']}", callback_data="qb|solid")]]

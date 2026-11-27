@@ -65,6 +65,7 @@ RECITERS = [
 AUDIO_URL = "https://everyayah.com/data/{folder}/{sss:03d}{aaa:03d}.mp3"
 
 STYLE_NAMES = {
+    "chat": "دردشة واتساب",
     "night": "ليل ونجوم",
     "ornament": "زخرفة إسلامية",
     "nature": "طبيعة",

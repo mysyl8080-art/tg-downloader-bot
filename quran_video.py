@@ -1,12 +1,14 @@
-"""Build a designed verse video: per-ayah image segments + recitation audio."""
+"""Build designed verse videos: cinematic styles (word reveal + parallax) and chat style."""
 import hashlib
+import math
 import os
 import subprocess
 
 import requests
 
 from quran_meta import RECITERS, AUDIO_URL
-from quran_render import render_ayah_image
+from quran_render import render_base, render_word_overlays, particle_paths
+from quran_chat import audio_bars, render_chat_base, render_player_patch
 
 W, H = 1080, 1920
 FPS = 24
@@ -15,7 +17,7 @@ MAX_SECONDS = 60
 CACHE = os.environ.get("QV_CACHE", "/tmp/quran_video_cache")
 os.makedirs(CACHE, exist_ok=True)
 
-_UA = {"User-Agent": "quran-video-bot/1.0"}
+_UA = {"User-Agent": "quran-video-bot/2.0"}
 
 
 class VideoError(Exception):
@@ -28,7 +30,7 @@ class VideoError(Exception):
 def _run(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
-        raise VideoError("ffmpeg", p.stderr[-400:])
+        raise VideoError("ffmpeg", (p.stderr or "")[-400:])
     return p
 
 
@@ -47,14 +49,96 @@ def _download(reciter, surah, ayah):
 
 
 def _duration(path):
-    p = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", path],
-        capture_output=True, text=True)
+    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", path],
+                       capture_output=True, text=True)
     try:
         return float(p.stdout.strip())
     except ValueError:
         raise VideoError("audio", "bad mp3")
+
+
+def _finish(seg, dur, vf_extra=""):
+    af = f"afade=t=in:st=0:d=0.2,afade=t=out:st={max(0.0, dur-0.3):.2f}:d=0.3"
+    return af
+
+
+def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid, apath, dur):
+    base_p = os.path.join(work, f"base_{tag}.png")
+    _p, light = render_base(reciter_ar, surah, a1, a2, style, solid, base_p)
+    words = render_word_overlays(surah, ayah, a1, dur, light, work, tag)
+    far_p, near_p, rays_p = particle_paths(style, solid, work)
+
+    inputs = [base_p, far_p, near_p]
+    if rays_p:
+        inputs.append(rays_p)
+    w0 = len(inputs)
+    inputs += [wp for (wp, _x, _y, _t, _f) in words]
+    inputs.append(apath)
+    ai = len(inputs) - 1
+
+    g = []
+    g.append(f"[0:v]scale={W}:{H},zoompan=z='min(1+0.00012*on,1.07)':"
+             f"x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H}:fps={FPS}[bg]")
+    g.append("[bg][1:v]overlay=x=-t*4:y=0[v1]")
+    g.append("[v1][2:v]overlay=x=-t*7:y=0[v2]")
+    cur = "v2"
+    if rays_p:
+        g.append(f"[{cur}][3:v]overlay=x='t*1.5-40':y=0[v3]")
+        cur = "v3"
+    for k, (_p, x, y, t, fade) in enumerate(words):
+        g.append(f"[{w0+k}:v]format=rgba,fade=t=in:st={t}:d={fade}:alpha=1[wk{k}]")
+        nxt = f"v{k+4}"
+        g.append(f"[{cur}][wk{k}]overlay={x}:{y}:enable='gte(t,{t})'[{nxt}]")
+        cur = nxt
+    g.append(f"[{cur}]fade=t=in:st=0:d=0.4,fade=t=out:st={max(0.0,dur-0.4):.2f}:d=0.4,"
+             f"format=yuv420p[vout]")
+    script = os.path.join(work, f"filter_{tag}.txt")
+    with open(script, "w") as f:
+        f.write(";\n".join(g))
+
+    seg = os.path.join(work, f"seg_{tag}.mp4")
+    cmd = ["ffmpeg", "-y"]
+    for i, p in enumerate(inputs):
+        if i == ai:
+            cmd += ["-i", p]
+        else:
+            cmd += ["-loop", "1", "-framerate", str(FPS), "-i", p]
+    cmd += ["-filter_complex_script", script, "-map", "[vout]", "-map", f"{ai}:a",
+            "-af", _finish(seg, dur),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg]
+    _run(cmd)
+    return seg
+
+
+def build_chat_segment(work, tag, surah, ayah, a1, a2, apath, dur):
+    bars = audio_bars(apath)
+    base_p = os.path.join(work, f"chatbase_{tag}.png")
+    _p, geom = render_chat_base(surah, ayah, a1, a2, bars, base_p)
+
+    steps = max(1, math.ceil(dur * 2))
+    for k in range(steps):
+        t = k / 2
+        render_player_patch(bars, min(1.0, t / dur), max(0.0, dur - t), geom,
+                            os.path.join(work, f"cp_{tag}_{k:03d}.png"), playing=(k > 0))
+    strip = os.path.join(work, f"strip_{tag}.mov")
+    _run(["ffmpeg", "-y", "-framerate", "2", "-i", os.path.join(work, f"cp_{tag}_%03d.png"),
+          "-frames:v", str(steps), "-c:v", "qtrle", strip])
+
+    seg = os.path.join(work, f"seg_{tag}.mp4")
+    script = os.path.join(work, f"filter_{tag}.txt")
+    with open(script, "w") as f:
+        f.write(f"[0:v][1:v]overlay=0:0:format=auto,"
+                f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(0.0,dur-0.3):.2f}:d=0.3,"
+                f"format=yuv420p[vout]")
+    _run(["ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS), "-i", base_p,
+          "-i", strip, "-i", apath,
+          "-filter_complex_script", script, "-map", "[vout]", "-map", "2:a",
+          "-af", _finish(seg, dur),
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+          "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg])
+    return seg
 
 
 def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
@@ -63,8 +147,7 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
         raise VideoError("reciter")
     reciter_ar = RECITERS[reciter][1]
 
-    audios = []
-    total = 0.0
+    audios, total = [], 0.0
     for ayah in range(a1, a2 + 1):
         p = _download(reciter, surah, ayah)
         dur = _duration(p)
@@ -74,7 +157,7 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
         raise VideoError("toolong", round(total))
 
     key = hashlib.sha1(
-        f"{reciter}|{surah}|{a1}|{a2}|{style}|{solid}".encode()).hexdigest()[:16]
+        f"v2|{reciter}|{surah}|{a1}|{a2}|{style}|{solid}".encode()).hexdigest()[:16]
     final = os.path.join(CACHE, f"v_{key}.mp4")
     if os.path.exists(final) and os.path.getsize(final) > 10000:
         return final, total
@@ -83,22 +166,11 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
     os.makedirs(work, exist_ok=True)
     segs = []
     for i, (ayah, apath, dur) in enumerate(audios):
-        png = os.path.join(work, f"img_{i}.png")
-        render_ayah_image(reciter_ar, surah, ayah, a1, a2, style, solid, out_path=png)
-        seg = os.path.join(work, f"seg_{i}.mp4")
-        fade_out_st = max(0.0, dur - 0.45)
-        vf = (
-            f"scale={W}:{H},"
-            f"zoompan=z='min(1+0.00009*on,1.07)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2'"
-            f":d=1:s={W}x{H}:fps={FPS},"
-            f"fade=t=in:st=0:d=0.45,fade=t=out:st={fade_out_st:.2f}:d=0.45,format=yuv420p"
-        )
-        af = f"afade=t=in:st=0:d=0.2,afade=t=out:st={max(0.0, dur-0.25):.2f}:d=0.25"
-        _run(["ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS), "-i", png,
-              "-i", apath, "-vf", vf, "-af", af,
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-              "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-              "-t", f"{dur:.3f}", seg])
+        if style == "chat":
+            seg = build_chat_segment(work, str(i), surah, ayah, a1, a2, apath, dur)
+        else:
+            seg = build_cine_segment(work, str(i), reciter_ar, surah, ayah, a1, a2,
+                                     style, solid, apath, dur)
         segs.append(seg)
         if progress:
             progress(i + 1, len(audios))
