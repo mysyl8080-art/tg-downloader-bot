@@ -5,6 +5,8 @@ import os
 import subprocess
 import shutil
 import logging
+import resource
+import gc
 
 log = logging.getLogger("quran_video")
 
@@ -39,7 +41,20 @@ def _run(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
         raise VideoError("ffmpeg", (p.stderr or "")[-400:])
+    log.info("ffmpeg done peak_child_rss=%.0fMB self_rss=%s",
+             resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024, _self_rss())
     return p
+
+
+def _self_rss():
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS"):
+                    return str(round(int(line.split()[1]) / 1024)) + "MB"
+    except Exception:
+        pass
+    return "?"
 
 
 def _download(reciter, surah, ayah):
@@ -83,9 +98,10 @@ def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid,
     if rays is not None:
         rays = rays.crop((0, 0, W + 60, H))
 
+    n_frames = max(1, int(round(dur * STRIP_FPS)))
+
     def strip_frames():
-        n = max(1, int(round(dur * STRIP_FPS)))
-        for k in range(n):
+        for k in range(n_frames):
             t = k / STRIP_FPS
             frame = Image.new("RGBA", (W, H))
             frame.paste(far, (-int(t * 4), 0), far)
@@ -102,28 +118,15 @@ def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid,
                     frame.paste(tmp, (x, y), tmp)
             yield frame.tobytes()
 
-    script = os.path.join(work, f"filter_{tag}.txt")
-    with open(script, "w") as f:
-        f.write(
-            f"[0:v]loop=loop=-1:size=1,fps={FPS},scale={W}:{H},"
-            f"zoompan=z='min(1+0.00012*on,1.07)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H},"
-            f"format=yuv420p[bg];\n"
-            f"[bg][1:v]overlay=0:0:format=yuv420[v1];\n"
-            f"[v1]fade=t=in:st=0:d=0.4,fade=t=out:st={max(0.0, dur-0.4):.2f}:d=0.4,null[vout]")
-
-    seg = os.path.join(work, f"seg_{tag}.mp4")
+    # pass 1: animated overlay strip to a small qtrle movie (light ffmpeg)
+    strip = os.path.join(work, f"strip_{tag}.mov")
     errp = os.path.join(work, f"err_{tag}.log")
-    cmd = ["ffmpeg", "-y", "-threads", "2", "-filter_threads", "2", "-filter_complex_threads", "2",
-           "-i", base_p,
-           "-thread_queue_size", "4", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-framerate", str(STRIP_FPS),
-           "-i", "pipe:0",
-           "-i", apath,
-           "-filter_complex_script", script, "-map", "[vout]", "-map", "2:a",
-           "-af", _finish(seg, dur),
-           "-c:v", "libx264", "-preset", "superfast", "-crf", "21",
-           "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg]
+    cmd1 = ["ffmpeg", "-y", "-threads", "2", "-thread_queue_size", "4",
+            "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}",
+            "-framerate", str(STRIP_FPS), "-i", "pipe:0",
+            "-frames:v", str(n_frames), "-c:v", "qtrle", strip]
     with open(errp, "wb") as errf:
-        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errf)
+        p = subprocess.Popen(cmd1, stdin=subprocess.PIPE, stderr=errf)
         try:
             for fr in strip_frames():
                 p.stdin.write(fr)
@@ -138,6 +141,30 @@ def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid,
     if rc != 0:
         with open(errp, "r", errors="replace") as f:
             raise VideoError("ffmpeg", f.read()[-400:])
+    log.info("strip done peak_child_rss=%.0fMB self_rss=%s",
+             resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024, _self_rss())
+
+    # free the PIL layers before the heavy encode
+    del far, near, rays, word_imgs
+    gc.collect()
+
+    # pass 2: static base + strip + audio (same shape as the light chat path)
+    script = os.path.join(work, f"filter_{tag}.txt")
+    with open(script, "w") as f:
+        f.write(
+            f"[0:v]loop=loop=-1:size=1,fps={FPS},scale={W}:{H},"
+            f"zoompan=z='min(1+0.00012*on,1.07)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H},"
+            f"format=yuv420p[bg];\n"
+            f"[bg][1:v]overlay=0:0:format=yuv420,fade=t=in:st=0:d=0.4,"
+            f"fade=t=out:st={max(0.0, dur-0.4):.2f}:d=0.4,null[vout]")
+
+    seg = os.path.join(work, f"seg_{tag}.mp4")
+    _run(["ffmpeg", "-y", "-threads", "2", "-filter_threads", "2", "-filter_complex_threads", "2",
+          "-i", base_p, "-i", strip, "-i", apath,
+          "-filter_complex_script", script, "-map", "[vout]", "-map", "2:a",
+          "-af", _finish(seg, dur),
+          "-c:v", "libx264", "-preset", "superfast", "-crf", "21",
+          "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-t", f"{dur:.3f}", seg])
     return seg
 
 
@@ -196,7 +223,7 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
             shutil.rmtree(os.path.join(CACHE, stale), ignore_errors=True)
     work = os.path.join(CACHE, f"w_{key}")
     os.makedirs(work, exist_ok=True)
-    log.info("render start reciter=%s surah=%s %s-%s style=%s dur=%.1f", reciter, surah, a1, a2, style, total)
+    log.info("render start reciter=%s surah=%s %s-%s style=%s dur=%.1f self_rss=%s", reciter, surah, a1, a2, style, total, _self_rss())
     segs = []
     for i, (ayah, apath, dur) in enumerate(audios):
         if style == "chat":
