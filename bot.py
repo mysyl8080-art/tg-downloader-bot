@@ -7,6 +7,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from downloader import DownloadError, cleanup, download_url, split_file, TG_LIMIT
+from quran_bot import quran_cb, quran_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -22,7 +23,8 @@ HELP = (
     "أرسل لي أي رابط وسأحمّله وأرسله لك هنا.\n\n"
     "• فيديو من يوتيوب، تيك توك، إنستغرام، تويتر/X، فيسبوك ومئات المواقع\n"
     "• أو رابط ملف مباشر (PDF, ZIP, صور...)\n\n"
-    "بعد إرسال الرابط اختر فيديو (360/480/720/1080) أو MP3 (128/192/320).\nالحد الأقصى 49 ميجا (حد تيليجرام للبوتات)."
+    "بعد إرسال الرابط اختر فيديو (360/480/720/1080) أو MP3 (128/192/320).\nالحد الأقصى 49 ميجا (حد تيليجرام للبوتات).\n\n"
+    "🎬 قسم فيديو الآيات: اضغط زر «فيديو آية قرآنية» واختر الخلفية والقارئ وأرسل رقم السورة والآية، ويصلك فيديو مصمم بالتلاوة."
 )
 
 def extract_url(text: str):
@@ -32,7 +34,10 @@ def extract_url(text: str):
 MUSHAF_URL = os.environ.get("MUSHAF_URL", "https://almushaf.surge.sh/")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📖 افتح المصحف", web_app=WebAppInfo(url=MUSHAF_URL))]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 فيديو آية قرآنية", callback_data="qmenu")],
+        [InlineKeyboardButton("📖 افتح المصحف", web_app=WebAppInfo(url=MUSHAF_URL))],
+    ])
     await update.message.reply_text(HELP, reply_markup=kb)
 
 async def post_init(app):
@@ -57,6 +62,8 @@ def menu_kb(key):
     return InlineKeyboardMarkup(rows)
 
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if await quran_text(update, ctx):
+        return
     msg = update.message
     text = msg.text or msg.caption or ""
     url = extract_url(text)
@@ -157,6 +164,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle))
+    app.add_handler(CallbackQueryHandler(quran_cb, pattern=r"^q"))
     app.add_handler(CallbackQueryHandler(on_choice))
     url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_URL")
     if url:
