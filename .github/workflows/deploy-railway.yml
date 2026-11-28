@@ -12,3 +12,5 @@ jobs:
       - run: railway up --service b90ddc04-fba8-4abc-9253-55feb3520ad5 --detach
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: 44e3b0fc-618a-4c2c-a5e0-ca7683029f48
+          RAILWAY_ENVIRONMENT: production
