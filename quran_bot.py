@@ -1,13 +1,14 @@
 """Quran verse video section: keyboards, flow state, and generation handler."""
 import asyncio
 import logging
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
-from quran_meta import (RECITERS, SOLID_COLORS, STYLE_NAMES, SURAH_SIMPLE,
-                        ar_num, parse_ref)
+from quran_meta import (AR_DIGITS_IN, RECITERS, SOLID_COLORS, STYLE_NAMES,
+                        SURAH_SIMPLE, SURAHS, ar_num, parse_ref)
 from quran_video import MAX_SECONDS, VideoError, make_verse_video
 
 log = logging.getLogger("bot.quran")
@@ -15,6 +16,8 @@ _gen_sem = asyncio.Semaphore(1)
 
 PER_PAGE = 8
 PAGES = (len(RECITERS) + PER_PAGE - 1) // PER_PAGE
+SURAH_PER_PAGE = 12
+SURAH_PAGES = (114 + SURAH_PER_PAGE - 1) // SURAH_PER_PAGE
 
 
 def _qv(ctx):
@@ -64,6 +67,28 @@ def reciter_kb(page):
     return InlineKeyboardMarkup(rows)
 
 
+def surah_kb(page):
+    page = max(0, min(page, SURAH_PAGES - 1))
+    rows, row = [], []
+    for i in range(page * SURAH_PER_PAGE, min((page + 1) * SURAH_PER_PAGE, 114)):
+        n = i + 1
+        row.append(InlineKeyboardButton(f"{ar_num(n)}. {SURAH_SIMPLE[i]}", callback_data=f"qn|{n}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ السابق", callback_data=f"qf|{page-1}"))
+    nav.append(InlineKeyboardButton(f"{ar_num(page+1)}/{ar_num(SURAH_PAGES)}", callback_data="qf|noop"))
+    if page < SURAH_PAGES - 1:
+        nav.append(InlineKeyboardButton("التالي ▶️", callback_data=f"qf|{page+1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ تغيير القارئ", callback_data="qrec")])
+    return InlineKeyboardMarkup(rows)
+
+
 def after_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔁 آية أخرى بنفس الإعدادات", callback_data="qagain")],
@@ -87,12 +112,36 @@ ASK_REF = ("أرسل الآية أو النطاق بهذه الصيغة:\n"
            f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.")
 
 
+async def _ask_surah(q, cfg, page=0):
+    st, rec = _settings_summary(cfg)
+    cfg["await"] = True
+    cfg.pop("surah", None)
+    await q.edit_message_text(
+        f"✅ الخلفية: {st}\n🎙 القارئ: {rec}\n\n"
+        f"📖 اختر السورة من القائمة، أو اكتب المرجع مباشرة مثل <code>2:255</code>:",
+        parse_mode="HTML", reply_markup=surah_kb(page))
+
+
 async def _ask_ref(q, cfg):
     st, rec = _settings_summary(cfg)
     cfg["await"] = True
-    await q.edit_message_text(
-        f"✅ الخلفية: {st}\n🎙 القارئ: {rec}\n\n{ASK_REF}",
-        parse_mode="HTML")
+    s = cfg.get("surah")
+    if s:
+        n_ayahs = len(SURAHS[s]["ayahs"])
+        await q.edit_message_text(
+            f"✅ الخلفية: {st}\n🎙 القارئ: {rec}\n"
+            f"📖 السورة: {SURAH_SIMPLE[s-1]} ({ar_num(n_ayahs)} آية)\n\n"
+            f"أرسل رقم الآية أو النطاق:\n"
+            f"• <code>255</code> لآية واحدة\n"
+            f"• <code>1-5</code> لنطاق آيات\n\n"
+            f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ تغيير السورة", callback_data="qsurah")]]))
+    else:
+        await q.edit_message_text(
+            f"✅ الخلفية: {st}\n🎙 القارئ: {rec}\n\n{ASK_REF}",
+            parse_mode="HTML")
 
 
 async def quran_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -137,9 +186,23 @@ async def quran_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not (0 <= idx < len(RECITERS)):
             return
         cfg["reciter"] = idx
+        await _ask_surah(q, cfg)
+    elif data.startswith("qf|"):
+        p = data.split("|", 1)[1]
+        if p == "noop":
+            return
+        await _ask_surah(q, cfg, int(p))
+    elif data == "qsurah":
+        page = (cfg.get("surah", 1) - 1) // SURAH_PER_PAGE
+        await _ask_surah(q, cfg, page)
+    elif data.startswith("qn|"):
+        s = int(data.split("|", 1)[1])
+        if not (1 <= s <= 114):
+            return
+        cfg["surah"] = s
         await _ask_ref(q, cfg)
     elif data == "qagain":
-        await _ask_ref(q, cfg)
+        await _ask_surah(q, cfg)
 
 
 async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -150,6 +213,9 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     text = (update.message.text or "").strip()
     if "http://" in text or "https://" in text:
         return False
+    s = cfg.get("surah")
+    if s and re.fullmatch(r"[0-9٠-٩]{1,3}(\s*[-–]\s*[0-9٠-٩]{1,3})?", text):
+        text = f"{s}:{text}"
     try:
         surah, a1, a2 = parse_ref(text)
     except ValueError as e:
