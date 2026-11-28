@@ -9,8 +9,8 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from quran_meta import (AR_DIGITS_IN, RECITERS, SOLID_COLORS, STYLE_NAMES,
-                        SURAH_SIMPLE, SURAHS, ar_num, ayah_text, match_verse,
-                        parse_ref)
+                        SURAH_SIMPLE, SURAHS, ar_num, ayah_text, find_surah,
+                        match_verse, parse_ref)
 from quran_video import MAX_SECONDS, VideoError, make_verse_video
 
 log = logging.getLogger("bot.quran")
@@ -274,6 +274,26 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     s = cfg.get("surah")
     if s and re.fullmatch(r"[0-9٠-٩]{1,3}(\s*[-–]\s*[0-9٠-٩]{1,3})?", text):
         text = f"{s}:{text}"
+    else:
+        # Bare surah name or number ("يس", "الفاتحة", "36"): let the user pick the ayah range.
+        bare = find_surah(text)
+        if bare is None and re.fullmatch(r"[0-9٠-٩]{1,3}", text):
+            n = int(text.translate(AR_DIGITS_IN))
+            if 1 <= n <= 114:
+                bare = n
+        if bare:
+            cfg["surah"] = bare
+            n_ayahs = len(SURAHS[bare]["ayahs"])
+            await update.message.reply_text(
+                f"📖 السورة: {SURAH_SIMPLE[bare-1]} ({ar_num(n_ayahs)} آية)\n\n"
+                f"أرسل رقم الآية أو النطاق:\n"
+                f"• <code>1</code> لآية واحدة\n"
+                f"• <code>1-5</code> لنطاق آيات\n\n"
+                f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ تغيير السورة", callback_data="qsurah")]]))
+            return True
     try:
         surah, a1, a2 = parse_ref(text)
     except ValueError as e:
