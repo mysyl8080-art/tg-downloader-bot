@@ -1,0 +1,4 @@
+python-telegram-bot==21.6
+yt-dlp[default,curl-cffi]>=2026.10.1
+requests>=2.31
+sentry-sdk>=2.0; python_version >= "3.8"
