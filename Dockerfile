@@ -12,5 +12,4 @@ COPY bot ./bot
 COPY admin ./admin
 COPY main.py .
 ENV DATA_DIR=/data
-VOLUME /data
 CMD ["python", "main.py"]
