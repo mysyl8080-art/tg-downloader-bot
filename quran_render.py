@@ -127,9 +127,6 @@ def render_base(reciter_ar, surah, a1, a2, style, solid, out_path, minimal=False
                   (cx - 11, Y_FOOT_DIV)], outline=gold + (190,), width=2)
     f_rec = _font(FONT_AMIRI, 46)
     draw.text((W // 2, Y_RECITER), f"الشيخ {reciter_ar}", font=f_rec, fill=gold_soft, anchor="mm", **_rtl)
-    f_brand = _font(FONT_AMIRI, 30)
-    draw.text((W // 2, Y_BRAND), "@Music_remover22bot", font=f_brand,
-              fill=gold_soft + (140,), anchor="mm")
     img.save(out_path)
     return out_path, light
 
