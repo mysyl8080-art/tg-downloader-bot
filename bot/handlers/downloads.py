@@ -69,7 +69,7 @@ async def start_probe(message, ctx, url, lang):
 
 
 async def run_download_task(bot, chat_id, user_id, url, kind, quality, audio_fmt,
-                            status_msg_id, lang):
+                            status_msg_id, lang, sub_lang=None):
     """The queued job body. Edits the status message, sends the files."""
 
     async def job(task: Task):
@@ -109,7 +109,7 @@ async def run_download_task(bot, chat_id, user_id, url, kind, quality, audio_fmt
             res = await asyncio.to_thread(
                 engine.download, url, workdir,
                 kind=kind, quality=quality, audio_fmt=audio_fmt,
-                cancel=cancel, progress=progress)
+                cancel=cancel, progress=progress, sub_lang=sub_lang)
         except engine.Cancelled:
             await _safe_edit(bot, chat_id, status_msg_id, t(lang, "cancelled"))
             db.log_download(user_id, url, detect_platform(url), kind, None, "cancelled")
@@ -164,7 +164,10 @@ async def run_download_task(bot, chat_id, user_id, url, kind, quality, audio_fmt
 
 async def _send_file(bot, chat_id, path, res, caption):
     with open(path, "rb") as f:
-        if res.is_video:
+        if os.path.splitext(path)[1].lower() in (".srt", ".vtt", ".ass", ".ssa"):
+            await bot.send_document(chat_id, f, caption=caption,
+                                    read_timeout=300, write_timeout=300)
+        elif res.is_video:
             w, h, dur = None, None, None
             try:
                 info = probe_media(path)

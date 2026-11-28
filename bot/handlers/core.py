@@ -25,6 +25,8 @@ async def guard(update: Update) -> bool:
     user = update.effective_user
     if not user:
         return False
+    if db.get_user(user.id) is None:
+        log.info("new user joined id=%s username=%s", user.id, user.username)
     db.upsert_user(user)
     lang = lang_of(user.id)
     if db.is_banned(user.id):

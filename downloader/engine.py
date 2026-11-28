@@ -112,7 +112,8 @@ def list_qualities(info):
 
 
 def download(url, workdir, *, kind="video", quality=720, audio_fmt="mp3",
-             container="mp4", cancel=None, progress=None, playlist_items=None):
+             container="mp4", cancel=None, progress=None, playlist_items=None,
+             sub_lang=None):
     """Download one URL. Returns Result. Runs in a worker thread.
 
     kind: 'video' | 'audio'
@@ -140,6 +141,13 @@ def download(url, workdir, *, kind="video", quality=720, audio_fmt="mp3",
     })
     if playlist_items:
         opts["playlist_items"] = playlist_items
+    if sub_lang:
+        opts.update({
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": [sub_lang],
+        })
     if kind == "audio":
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [{
@@ -175,10 +183,10 @@ def download(url, workdir, *, kind="video", quality=720, audio_fmt="mp3",
         key=os.path.getmtime)
     files = [f for f in files if os.path.isfile(f) and os.path.getsize(f) > 0]
     if not files:
-        raise DownloadError("toobig")
+        raise DownloadError("nosubs" if sub_lang else "toobig")
 
     title = safe_filename((info or {}).get("title") or os.path.basename(files[0]))
-    is_video = kind == "video"
+    is_video = kind == "video" and not sub_lang
     duration = (info or {}).get("duration")
     thumb = _find_thumb(workdir)
     paths = []

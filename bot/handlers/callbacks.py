@@ -53,6 +53,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await user_h.on_setting(q, uid, lang, data[2:])
 
     # --- downloads ---
+    elif data.startswith("sub:"):
+        await on_subtitle_choice(q, ctx, uid, lang, data[4:])
     elif data.startswith("dl:"):
         await on_download_choice(q, ctx, uid, lang, data)
     elif data.startswith("pl:"):
@@ -77,6 +79,16 @@ async def on_download_choice(q, ctx, uid, lang, data):
         pending.pop(uid, None)
         await q.edit_message_text(t(lang, "cancelled"))
         return
+    if action == "back":
+        if not pend or pend.get("kind") != "single":
+            await q.edit_message_text(t(lang, "send_link"))
+            return
+        from types import SimpleNamespace
+        pv = SimpleNamespace(qualities=pend.get("qualities"),
+                             subtitles=pend.get("subtitles"))
+        await q.edit_message_text(t(lang, "choose"),
+                                  reply_markup=kb.quality_kb(pv, lang))
+        return
     if not pend or pend.get("kind") != "single":
         await q.edit_message_text(t(lang, "send_link"))
         return
@@ -96,6 +108,14 @@ async def on_download_choice(q, ctx, uid, lang, data):
         await run(q, ctx, uid, lang, url, "audio", 0, parts[2])
 
 
+async def on_subtitle_choice(q, ctx, uid, lang, sub_lang):
+    pend = pending.get(uid)
+    if not pend or pend.get("kind") != "single":
+        await q.edit_message_text(t(lang, "send_link"))
+        return
+    await run(q, ctx, uid, lang, pend["url"], "sub", 0, "mp3", sub_lang=sub_lang)
+
+
 def _subs_kb(url, subs, lang):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     rows = [[InlineKeyboardButton(s, callback_data=f"sub:{s}")] for s in subs[:8]]
@@ -103,10 +123,11 @@ def _subs_kb(url, subs, lang):
     return InlineKeyboardMarkup(rows)
 
 
-async def run(q, ctx, uid, lang, url, kind, quality, audio_fmt):
+async def run(q, ctx, uid, lang, url, kind, quality, audio_fmt, sub_lang=None):
     await q.edit_message_text(t(lang, "downloading"))
     await downloads.run_download_task(ctx.bot, q.message.chat_id, uid, url,
-                                      kind, quality, audio_fmt, q.message.message_id, lang)
+                                      kind, quality, audio_fmt, q.message.message_id,
+                                      lang, sub_lang=sub_lang)
 
 
 async def on_playlist_choice(q, ctx, uid, lang, action):
