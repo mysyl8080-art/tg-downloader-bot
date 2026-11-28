@@ -160,3 +160,79 @@ def parse_ref(text):
     if a2 - a1 + 1 > 15:
         raise ValueError("الحد الأقصى ١٥ آية في المقطع الواحد.")
     return surah, a1, a2
+
+
+_DIACRITICS = re.compile(r"[ً-ْٰـۖ-ۭۚ-۟۠-۩]")
+
+
+def _norm(t):
+    t = _DIACRITICS.sub("", t)
+    for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ٱ", "ا"),
+                 ("ة", "ه"), ("ى", "ي"), ("ؤ", "و"), ("ئ", "ي")):
+        t = t.replace(a, b)
+    t = re.sub(r"[^ء-ي ]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+_NORM_INDEX = None
+_BASMALA_N = ""
+
+
+def _norm_index():
+    global _NORM_INDEX, _BASMALA_N
+    if _NORM_INDEX is None:
+        _BASMALA_N = _norm(BASMALA)
+        _NORM_INDEX = [(s, i + 1, _norm(ayah_text(s, i + 1)))
+                       for s in range(1, 115)
+                       for i in range(len(SURAHS[s]["ayahs"]))]
+    return _NORM_INDEX
+
+
+def match_verse(text):
+    """Match pasted verse text to (surah, ayah, score 0..1), or None."""
+    import difflib
+    n = _norm(text or "")
+    if _BASMALA_N and n.startswith(_BASMALA_N) and len(n) > len(_BASMALA_N) + 6:
+        n = n[len(_BASMALA_N):].strip()
+    if len(n) < 8:
+        return None
+    idx = _norm_index()
+    npad, cands = f" {n} ", []
+    for s, a, an in idx:
+        if not an or len(an) < 8:
+            continue
+        apad = f" {an} "
+        if npad in apad or apad in npad:
+            score = 0.95 + 0.05 * min(len(n), len(an)) / max(len(n), len(an))
+            cands.append((score, s, a))
+    if cands:
+        cands.sort(reverse=True)
+        return (cands[0][1], cands[0][2], cands[0][0])
+    ntok = set(n.split())
+    need = max(2, int(0.5 * len(ntok)))
+    pre = []
+    for s, a, an in idx:
+        shared = len(ntok & set(an.split()))
+        if shared >= need:
+            pre.append((shared, s, a, an))
+    pre.sort(key=lambda x: -x[0])
+    nw = n.split()
+    best_r, best = 0.0, None
+    for shared, s, a, an in pre[:40]:
+        aw = an.split()
+        if len(aw) <= len(nw) + 3:
+            rmax = difflib.SequenceMatcher(None, n, an).ratio()
+        else:
+            rmax = 0.0
+            for wlen in (len(nw) - 1, len(nw), len(nw) + 1, len(nw) + 2):
+                if wlen < 2:
+                    continue
+                for i in range(len(aw) - wlen + 1):
+                    r = difflib.SequenceMatcher(None, n, " ".join(aw[i:i + wlen])).ratio()
+                    if r > rmax:
+                        rmax = r
+        if rmax > best_r:
+            best_r, best = rmax, (s, a)
+    if best and best_r >= 0.72:
+        return (best[0], best[1], best_r)
+    return None

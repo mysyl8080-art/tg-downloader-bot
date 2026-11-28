@@ -9,7 +9,8 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from quran_meta import (AR_DIGITS_IN, RECITERS, SOLID_COLORS, STYLE_NAMES,
-                        SURAH_SIMPLE, SURAHS, ar_num, parse_ref)
+                        SURAH_SIMPLE, SURAHS, ar_num, ayah_text, match_verse,
+                        parse_ref)
 from quran_video import MAX_SECONDS, VideoError, make_verse_video
 
 log = logging.getLogger("bot.quran")
@@ -153,7 +154,7 @@ ASK_REF = ("أرسل الآية أو النطاق بهذه الصيغة:\n"
            "• <code>2:255</code> لآية واحدة\n"
            "• <code>36:1-5</code> لنطاق آيات\n"
            "• أو باسم السورة: <code>الفاتحة 1-7</code>\n\n"
-           f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.")
+           f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍")
 
 
 async def _ask_surah(q, cfg, page=0):
@@ -162,7 +163,7 @@ async def _ask_surah(q, cfg, page=0):
     cfg.pop("surah", None)
     await q.edit_message_text(
         f"✅ الخلفية: {st}\n🎙 القارئ: {rec}\n\n"
-        f"📖 اختر السورة من القائمة، أو اكتب المرجع مباشرة مثل <code>2:255</code>:",
+        f"📖 اختر السورة من القائمة، أو اكتب المرجع مثل <code>2:255</code>، أو الصق نص الآية نفسها:",
         parse_mode="HTML", reply_markup=surah_kb(page))
 
 
@@ -178,7 +179,7 @@ async def _ask_ref(q, cfg):
             f"أرسل رقم الآية أو النطاق:\n"
             f"• <code>255</code> لآية واحدة\n"
             f"• <code>1-5</code> لنطاق آيات\n\n"
-            f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.",
+            f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ تغيير السورة", callback_data="qsurah")]]))
@@ -247,6 +248,17 @@ async def quran_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         cfg["surah"] = s
         await _ask_ref(q, cfg)
+    elif data == "qok":
+        pend = cfg.pop("pending", None)
+        if not pend or q.message is None:
+            return
+        s, a = pend
+        cfg["await"] = False
+        await _generate(q.message, ctx.bot, cfg, s, a, a)
+    elif data == "qno":
+        cfg.pop("pending", None)
+        await q.edit_message_text("حسنًا. أعد كتابة نص الآية أو أرسل المرجع مثل <code>2:255</code>.",
+                                  parse_mode="HTML")
     elif data == "qagain":
         await _ask_surah(q, cfg)
 
@@ -265,12 +277,27 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         surah, a1, a2 = parse_ref(text)
     except ValueError as e:
-        await update.message.reply_text(f"⚠️ {e}")
+        hit = await asyncio.to_thread(match_verse, text)
+        if not hit:
+            await update.message.reply_text(f"⚠️ {e}\n\nأو الصق نص الآية كاملة وسأتعرف عليها 🔍")
+            return True
+        s, a, score = hit
+        cfg["pending"] = (s, a)
+        await update.message.reply_text(
+            f"🔍 وجدت هذه الآية:\n\n{ayah_text(s, a)} ﴿{ar_num(a)}﴾\n\n"
+            f"📖 سورة {SURAH_SIMPLE[s-1]} – الآية {ar_num(a)}\n\nهل هي المقصودة؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ نعم، أنشئ الفيديو", callback_data="qok")],
+                [InlineKeyboardButton("❌ ليست كذلك", callback_data="qno")]]))
         return True
+    await _generate(update.message, ctx.bot, cfg, surah, a1, a2)
+    return True
 
+
+async def _generate(message, bot, cfg, surah, a1, a2):
     status = await update.message.reply_text(
         "⏳ جاري تحميل التلاوة وتصميم الفيديو... قد يستغرق حوالي دقيقة.")
-    await ctx.bot.send_chat_action(update.message.chat_id, ChatAction.RECORD_VIDEO)
+    await bot.send_chat_action(message.chat_id, ChatAction.RECORD_VIDEO)
     async with _gen_sem:
         try:
             path, dur = await asyncio.to_thread(
@@ -286,11 +313,11 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
             else:
                 log.error("video error: %s %s", e.code, e.detail)
                 await status.edit_text("❌ حدث خطأ أثناء إنشاء الفيديو. أعد المحاولة.")
-            return True
+            return
         except Exception:
             log.exception("verse video failed")
             await status.edit_text("❌ حدث خطأ غير متوقع. أعد المحاولة.")
-            return True
+            return
 
     rng = f"الآية {ar_num(a1)}" if a1 == a2 else f"الآيات {ar_num(a1)} – {ar_num(a2)}"
     cap = (f"🎬 سورة {SURAH_SIMPLE[surah-1]} – {rng}\n"
@@ -298,14 +325,14 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
            f"⏱ {ar_num(round(dur))} ثانية")
     try:
         await status.edit_text("📤 جاري إرسال الفيديو...")
-        await ctx.bot.send_chat_action(update.message.chat_id, ChatAction.UPLOAD_VIDEO)
+        await bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
         with open(path, "rb") as f:
-            await ctx.bot.send_video(update.message.chat_id, f, caption=cap,
+            await bot.send_video(message.chat_id, f, caption=cap,
                                      width=1080, height=1920, supports_streaming=True,
                                      read_timeout=300, write_timeout=300)
         await status.delete()
-        await update.message.reply_text("هل تريد فيديو آخر؟", reply_markup=after_kb())
+        await message.reply_text("هل تريد فيديو آخر؟", reply_markup=after_kb())
     except Exception:
         log.exception("send video failed")
         await status.edit_text("❌ تم إنشاء الفيديو لكن فشل الإرسال.")
-    return True
+    return
