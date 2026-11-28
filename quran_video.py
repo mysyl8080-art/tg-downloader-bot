@@ -89,7 +89,7 @@ def _finish(seg, dur, vf_extra=""):
 def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid, apath, dur):
     base_p = os.path.join(work, f"base_{tag}.png")
     _p, light = render_base(reciter_ar, surah, a1, a2, style, solid, base_p, minimal=(style == "dark"))
-    words = render_word_overlays(surah, ayah, a1, dur, light, work, tag)
+    words = [] if style == "dark" else render_word_overlays(surah, ayah, a1, dur, light, work, tag)
     word_imgs = [(Image.open(p).copy(), x, y, t, f) for (p, x, y, t, f) in words]
 
     _b, far, near, rays, _l = make_layers(style, solid)
