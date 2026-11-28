@@ -157,8 +157,8 @@ def parse_ref(text):
     n_ayahs = len(SURAHS[surah]["ayahs"])
     if not (1 <= a1 <= n_ayahs) or not (a1 <= a2 <= n_ayahs):
         raise ValueError(f"سورة {SURAH_SIMPLE[surah-1]} فيها {ar_num(n_ayahs)} آية فقط. راجع الأرقام.")
-    if a2 - a1 + 1 > 15:
-        raise ValueError("الحد الأقصى ١٥ آية في المقطع الواحد.")
+    if a2 - a1 + 1 > 60:
+        raise ValueError("الحد الأقصى ٦٠ آية في المقطع الواحد و٥ دقائق إجمالًا.")
     return surah, a1, a2
 
 

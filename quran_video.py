@@ -22,7 +22,8 @@ from quran_chat import audio_bars, render_chat_base, render_player_patch
 W, H = 1080, 1920
 FPS = 30
 STRIP_FPS = 12
-MAX_SECONDS = 60
+MAX_SECONDS = 300
+MAX_SEND_BYTES = 46 * 1000 * 1000  # Telegram bot uploads cap at 50MB; keep margin
 
 CACHE = os.environ.get("QV_CACHE", "/tmp/quran_video_cache")
 os.makedirs(CACHE, exist_ok=True)
@@ -237,9 +238,9 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
         p = _download(reciter, surah, ayah)
         dur = _duration(p)
         total += dur
+        if total > MAX_SECONDS:
+            raise VideoError("toolong", round(total))
         audios.append((ayah, p, dur))
-    if total > MAX_SECONDS:
-        raise VideoError("toolong", round(total))
 
     key = hashlib.sha1(
         f"v4|{reciter}|{surah}|{a1}|{a2}|{style}|{solid}".encode()).hexdigest()[:16]
@@ -264,17 +265,28 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
         if progress:
             progress(i + 1, len(audios))
 
+    lst = os.path.join(work, "list.txt")
+    with open(lst, "w") as f:
+        for s in segs:
+            f.write(f"file '{s}'\n")
     if len(segs) == 1:
         os.replace(segs[0], final)
-        shutil.rmtree(work, ignore_errors=True)
-        log.info("render done %s (%.1fs, %dKB)", final, total, os.path.getsize(final) // 1024)
     else:
-        lst = os.path.join(work, "list.txt")
-        with open(lst, "w") as f:
-            for s in segs:
-                f.write(f"file '{s}'\n")
         _run(["ffmpeg", "-y", "-threads", "2", "-f", "concat", "-safe", "0", "-i", lst,
               "-c", "copy", "-movflags", "+faststart", final])
+    if os.path.getsize(final) > MAX_SEND_BYTES:
+        # Long videos: re-encode at 720p with a duration-fit bitrate so the file
+        # always stays under Telegram's 50MB bot upload cap.
+        abr = 128_000
+        vbr = max(650, int((MAX_SEND_BYTES * 8 - abr * total) / total / 1000))
+        log.info("recompress %.1fs -> 720p vbr=%dk", total, vbr)
+        comp = os.path.join(work, "comp.mp4")
+        _run(["ffmpeg", "-y", "-threads", "2", "-i", final,
+              "-vf", "scale=720:1280", "-c:v", "libx264", "-preset", "superfast",
+              "-b:v", f"{vbr}k", "-maxrate", f"{int(vbr * 1.5)}k", "-bufsize", f"{vbr * 3}k",
+              "-c:a", "aac", "-b:a", f"{abr // 1000}k", "-ar", "44100",
+              "-movflags", "+faststart", comp])
+        os.replace(comp, final)
     shutil.rmtree(work, ignore_errors=True)
     log.info("render done %s (%.1fs, %dKB)", final, total, os.path.getsize(final) // 1024)
     return final, total

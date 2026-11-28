@@ -150,11 +150,13 @@ def _settings_summary(cfg):
     return st, rec
 
 
+MAX_TXT = f"{ar_num(MAX_SECONDS // 60)} دقائق" if MAX_SECONDS % 60 == 0 else f"{ar_num(MAX_SECONDS)} ثانية"
+
 ASK_REF = ("أرسل الآية أو النطاق بهذه الصيغة:\n"
            "• <code>2:255</code> لآية واحدة\n"
            "• <code>36:1-5</code> لنطاق آيات\n"
            "• أو باسم السورة: <code>الفاتحة 1-7</code>\n\n"
-           f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍")
+           f"الحد الأقصى لطول الفيديو {MAX_TXT}.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍")
 
 
 async def _ask_surah(q, cfg, page=0):
@@ -179,7 +181,7 @@ async def _ask_ref(q, cfg):
             f"أرسل رقم الآية أو النطاق:\n"
             f"• <code>255</code> لآية واحدة\n"
             f"• <code>1-5</code> لنطاق آيات\n\n"
-            f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍",
+            f"الحد الأقصى لطول الفيديو {MAX_TXT}.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ تغيير السورة", callback_data="qsurah")]]))
@@ -289,7 +291,7 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
                 f"أرسل رقم الآية أو النطاق:\n"
                 f"• <code>1</code> لآية واحدة\n"
                 f"• <code>1-5</code> لنطاق آيات\n\n"
-                f"الحد الأقصى لطول الفيديو {ar_num(MAX_SECONDS)} ثانية.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍",
+                f"الحد الأقصى لطول الفيديو {MAX_TXT}.\n\nأو الصق نص الآية نفسها وسأتعرف عليها 🔍",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("⬅️ تغيير السورة", callback_data="qsurah")]]))
@@ -318,16 +320,28 @@ async def _generate(message, bot, cfg, surah, a1, a2):
     status = await message.reply_text(
         "⏳ جاري تحميل التلاوة وتصميم الفيديو... قد يستغرق حوالي دقيقة.")
     await bot.send_chat_action(message.chat_id, ChatAction.RECORD_VIDEO)
+    loop = asyncio.get_running_loop()
+
+    def _progress(i, n):
+        if n < 3:
+            return
+        async def _edit():
+            try:
+                await status.edit_text(f"⏳ جاري تصميم الفيديو... مقطع {ar_num(i)} من {ar_num(n)}.")
+            except Exception:
+                pass
+        asyncio.run_coroutine_threadsafe(_edit(), loop)
+
     async with _gen_sem:
         try:
             path, dur = await asyncio.to_thread(
                 make_verse_video, cfg.get("reciter", 0), surah, a1, a2,
-                cfg.get("style", "night"), cfg.get("solid"))
+                cfg.get("style", "night"), cfg.get("solid"), _progress)
         except VideoError as e:
             if e.code == "toolong":
                 await status.edit_text(
                     f"⚠️ هذا الاختيار طوله {ar_num(e.detail)} ثانية، والحد الأقصى "
-                    f"{ar_num(MAX_SECONDS)} ثانية.\nقلّل النطاق (مثلًا آية أو آيتين) وأرسل مرة أخرى.")
+                    f"{MAX_TXT}.\nقلّل النطاق وأرسل مرة أخرى.")
             elif e.code == "audio":
                 await status.edit_text("❌ تعذر تحميل التلاوة لهذه الآية. جرّب قارئًا آخر أو أعد المحاولة.")
             else:
@@ -340,9 +354,11 @@ async def _generate(message, bot, cfg, surah, a1, a2):
             return
 
     rng = f"الآية {ar_num(a1)}" if a1 == a2 else f"الآيات {ar_num(a1)} – {ar_num(a2)}"
+    dur_txt = (f"{ar_num(int(dur) // 60)}:{ar_num(int(dur) % 60):02}" if dur >= 90
+               else f"{ar_num(round(dur))} ثانية")
     cap = (f"🎬 سورة {SURAH_SIMPLE[surah-1]} – {rng}\n"
            f"🎙 الشيخ {RECITERS[cfg.get('reciter', 0)][1]}\n"
-           f"⏱ {ar_num(round(dur))} ثانية")
+           f"⏱ {dur_txt}")
     try:
         await status.edit_text("📤 جاري إرسال الفيديو...")
         await bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
