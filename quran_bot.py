@@ -1,9 +1,10 @@
 """Quran verse video section: keyboards, flow state, and generation handler."""
 import asyncio
 import logging
+import os
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -24,13 +25,56 @@ def _qv(ctx):
     return ctx.user_data.setdefault("qv", {})
 
 
+STYLE_ORDER = ["chat", "night", "ornament", "nature", "solid"]
+STYLE_EMOJI = {"chat": "💬", "night": "🌌", "ornament": "🕌", "nature": "🌅", "solid": "🎨"}
+PREVIEW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "previews")
+_preview_ids = {}
+
+
+def style_caption(i, style):
+    extra = " (٦ ألوان)" if style == "solid" else ""
+    return f"{ar_num(i + 1)} {STYLE_EMOJI[style]} {STYLE_NAMES[style]}{extra}"
+
+
 def style_kb():
-    rows = [[InlineKeyboardButton(f"💬 {STYLE_NAMES['chat']}", callback_data="qb|chat")],
-            [InlineKeyboardButton(f"🌌 {STYLE_NAMES['night']}", callback_data="qb|night")],
-            [InlineKeyboardButton(f"🕌 {STYLE_NAMES['ornament']}", callback_data="qb|ornament")],
-            [InlineKeyboardButton(f"🌅 {STYLE_NAMES['nature']}", callback_data="qb|nature")],
-            [InlineKeyboardButton(f"🎨 {STYLE_NAMES['solid']}", callback_data="qb|solid")]]
+    rows = []
+    for i, style in enumerate(STYLE_ORDER):
+        rows.append([InlineKeyboardButton(style_caption(i, style), callback_data=f"qb|{style}")])
     return InlineKeyboardMarkup(rows)
+
+
+async def send_style_gallery(bot, chat_id):
+    """Send the 5 design previews as one album; caches Telegram file_ids in memory."""
+    def media(use_ids):
+        out = []
+        for i, style in enumerate(STYLE_ORDER):
+            fid = _preview_ids.get(style) if use_ids else None
+            if fid:
+                out.append(InputMediaPhoto(fid, caption=style_caption(i, style)))
+            else:
+                with open(os.path.join(PREVIEW_DIR, f"{style}.jpg"), "rb") as f:
+                    out.append(InputMediaPhoto(f.read(), caption=style_caption(i, style)))
+        return out
+
+    use_ids = all(s in _preview_ids for s in STYLE_ORDER)
+    try:
+        msgs = await bot.send_media_group(chat_id, media(use_ids),
+                                          read_timeout=120, write_timeout=120)
+    except Exception:
+        if not use_ids:
+            log.exception("style gallery failed")
+            return
+        _preview_ids.clear()
+        try:
+            msgs = await bot.send_media_group(chat_id, media(False),
+                                              read_timeout=120, write_timeout=120)
+        except Exception:
+            log.exception("style gallery retry failed")
+            return
+    if not use_ids:
+        for style, m in zip(STYLE_ORDER, msgs):
+            if m.photo:
+                _preview_ids[style] = m.photo[-1].file_id
 
 
 def solid_kb():
@@ -155,7 +199,9 @@ async def quran_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "qmenu":
         cfg["await"] = False
-        await q.edit_message_text("🎬 فيديو آية قرآنية\n\nاختر الخلفية:", reply_markup=style_kb())
+        await q.edit_message_text("🎬 فيديو آية قرآنية\n\nاختر التصميم من المعرض بالأسفل:",
+                                  reply_markup=style_kb())
+        await send_style_gallery(q.get_bot(), q.message.chat_id)
     elif data.startswith("qb|"):
         style = data.split("|", 1)[1]
         if style not in STYLE_NAMES:
