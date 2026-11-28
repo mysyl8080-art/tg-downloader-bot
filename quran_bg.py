@@ -212,10 +212,20 @@ def _solid(rgb, light=False):
     return base, far, near, None
 
 
+def _dark():
+    base = vgrad([(6, 6, 9), (0, 0, 0)])
+    _vignette(base, 85)
+    empty = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    return base, empty, empty.copy(), None
+
+
 def make_layers(style, solid=None):
     """Return (base RGB with frame, far RGBA, near RGBA, rays RGBA|None, light bool)."""
     from quran_meta import SOLID_COLORS
-    if style == "night":
+    if style == "dark":
+        base, far, near, rays = _dark()
+        return base, far, near, rays, False  # no frame: pure black
+    elif style == "night":
         base, far, near, rays = _night()
         light = False
     elif style == "ornament":

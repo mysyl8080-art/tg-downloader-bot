@@ -25,8 +25,8 @@ def _qv(ctx):
     return ctx.user_data.setdefault("qv", {})
 
 
-STYLE_ORDER = ["chat", "night", "ornament", "nature", "solid"]
-STYLE_EMOJI = {"chat": "💬", "night": "🌌", "ornament": "🕌", "nature": "🌅", "solid": "🎨"}
+STYLE_ORDER = ["chat", "dark", "night", "ornament", "nature", "solid"]
+STYLE_EMOJI = {"chat": "💬", "night": "🌌", "ornament": "🕌", "nature": "🌅", "solid": "🎨", "dark": "⚫"}
 PREVIEW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "previews")
 _preview_ids = {}
 

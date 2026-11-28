@@ -96,10 +96,13 @@ def layout_ayah(draw, text, dur):
     return font, placed
 
 
-def render_base(reciter_ar, surah, a1, a2, style, solid, out_path):
-    """Background + header + footer, without the verse words."""
+def render_base(reciter_ar, surah, a1, a2, style, solid, out_path, minimal=False):
+    """Background + header + footer, without the verse words. minimal: verse only."""
     base, _far, _near, _rays, light = make_layers(style, solid)
     img = base.convert("RGB")
+    if minimal:
+        img.save(out_path)
+        return out_path, light
     draw = ImageDraw.Draw(img, "RGBA")
     gold = DARK_GOLD if light else GOLD
     gold_soft = (120, 96, 50) if light else GOLD_SOFT
