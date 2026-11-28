@@ -16,7 +16,7 @@ from quran_meta import RECITERS, AUDIO_URL
 from PIL import Image
 
 from quran_bg import make_layers
-from quran_render import render_base, render_furniture, render_word_overlays
+from quran_render import render_base, render_cine_header, render_cine_overlays
 from quran_chat import audio_bars, render_chat_base, render_player_patch
 
 W, H = 1080, 1920
@@ -31,7 +31,7 @@ _UA = {"User-Agent": "quran-video-bot/2.0"}
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # style -> (bg clip in assets/bg, darkening for eq=brightness)
-VIDEO_BG = {"night": ("stars.mp4", -0.28), "nature": ("sea.mp4", -0.20)}
+VIDEO_BG = {"night": ("stars.mp4", -0.18), "nature": ("sea.mp4", -0.24)}
 
 
 class VideoError(Exception):
@@ -93,21 +93,21 @@ def _finish(seg, dur, vf_extra=""):
 def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid, apath, dur):
     vbg = VIDEO_BG.get(style)
     base_p = os.path.join(work, f"base_{tag}.png")
-    if vbg:
-        render_furniture(reciter_ar, surah, a1, a2, base_p)
-        words = render_word_overlays(surah, ayah, a1, dur, False, work, tag, shadow=True)
-        far = Image.new("RGBA", (W + int(MAX_SECONDS * 4) + 8, H), (0, 0, 0, 0))
-        near = Image.new("RGBA", (W + int(MAX_SECONDS * 7) + 8, H), (0, 0, 0, 0))
-        rays = None
-    else:
-        _p, light = render_base(reciter_ar, surah, a1, a2, style, solid, base_p, minimal=(style == "dark"))
-        words = [] if style == "dark" else render_word_overlays(surah, ayah, a1, dur, light, work, tag, shadow=True)
+    far = near = rays = None
+    if not vbg:
+        render_base(reciter_ar, surah, a1, a2, style, solid, base_p, minimal=True)
         _b, far, near, rays, _l = make_layers(style, solid)
         far = far.crop((0, 0, W + int(MAX_SECONDS * 4) + 8, H))
         near = near.crop((0, 0, W + int(MAX_SECONDS * 7) + 8, H))
         if rays is not None:
             rays = rays.crop((0, 0, W + 60, H))
-    word_imgs = [(Image.open(p).copy(), x, y, t, f) for (p, x, y, t, f) in words]
+
+    items = []
+    if style != "dark":
+        hp, hx, hy = render_cine_header(surah, work, tag)
+        items.append((hp, hx, hy, 0.0, round(dur, 3), 0.5, 0.35))
+        items += render_cine_overlays(surah, ayah, a1, dur, work, tag)
+    item_imgs = [(Image.open(p).copy(), x, y, t0, t1, fi, fo) for (p, x, y, t0, t1, fi, fo) in items]
 
     n_frames = max(1, int(round(dur * STRIP_FPS)))
 
@@ -115,12 +115,17 @@ def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid,
         for k in range(n_frames):
             t = k / STRIP_FPS
             frame = Image.new("RGBA", (W, H))
-            frame.paste(far, (-int(t * 4), 0), far)
-            frame.paste(near, (-int(t * 7), 0), near)
-            if rays is not None:
-                frame.paste(rays, (int(t * 1.5) - 40, 0), rays)
-            for img, x, y, tk, fade in word_imgs:
-                a = (t - tk) / fade
+            if far is not None:
+                frame.paste(far, (-int(t * 4), 0), far)
+                frame.paste(near, (-int(t * 7), 0), near)
+                if rays is not None:
+                    frame.paste(rays, (int(t * 1.5) - 40, 0), rays)
+            for img, x, y, t0, t1, fi, fo in item_imgs:
+                a = 1.0
+                if fi > 0:
+                    a = min(a, (t - t0) / fi)
+                if fo > 0:
+                    a = min(a, (t1 - t) / fo)
                 if a >= 1:
                     frame.paste(img, (x, y), img)
                 elif a > 0:
@@ -155,33 +160,32 @@ def build_cine_segment(work, tag, reciter_ar, surah, ayah, a1, a2, style, solid,
     log.info("strip done peak_child_rss=%.0fMB self_rss=%s",
              resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024, _self_rss())
 
-    # free the PIL layers before the heavy encode
-    del far, near, rays, word_imgs
+    del item_imgs, far, near, rays
     gc.collect()
 
-    # pass 2: base (video clip or static card) + furniture/strip + audio
+    # pass 2: base (video clip or static card) + strip + audio
     script = os.path.join(work, f"filter_{tag}.txt")
     with open(script, "w") as f:
         if vbg:
             f.write(
                 f"[0:v]fps={FPS},scale={W}:{H}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{H},setsar=1,eq=brightness={vbg[1]}:saturation=0.85,format=yuv420p[bg];\n"
-                f"[bg][1:v]overlay=0:0:format=yuv420[bgf];\n"
-                f"[bgf][2:v]overlay=0:0:format=yuv420,fade=t=in:st=0:d=0.4,"
-                f"fade=t=out:st={max(0.0, dur-0.4):.2f}:d=0.4,null[vout]")
+                f"crop={W}:{H},setsar=1,eq=brightness={vbg[1]}:saturation=0.9,vignette=angle=PI/7,"
+                f"format=yuv420p[bg];\n"
+                f"[bg][1:v]overlay=0:0:format=yuv420,fade=t=in:st=0:d=0.25,"
+                f"fade=t=out:st={max(0.0, dur-0.25):.2f}:d=0.25,null[vout]")
         else:
             f.write(
                 f"[0:v]loop=loop=-1:size=1,fps={FPS},scale={W}:{H},"
-                f"zoompan=z='min(1+0.00012*on,1.07)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H},"
+                f"zoompan=z='min(1+0.00012*on,1.07)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={W}x{H},fps={FPS},"
                 f"format=yuv420p[bg];\n"
-                f"[bg][1:v]overlay=0:0:format=yuv420,fade=t=in:st=0:d=0.4,"
-                f"fade=t=out:st={max(0.0, dur-0.4):.2f}:d=0.4,null[vout]")
+                f"[bg][1:v]overlay=0:0:format=yuv420,fade=t=in:st=0:d=0.25,"
+                f"fade=t=out:st={max(0.0, dur-0.25):.2f}:d=0.25,null[vout]")
 
     seg = os.path.join(work, f"seg_{tag}.mp4")
     if vbg:
         inputs = ["-stream_loop", "-1", "-i", os.path.join(BASE, "assets", "bg", vbg[0]),
-                  "-i", base_p, "-i", strip, "-i", apath]
-        amap = "3:a"
+                  "-i", strip, "-i", apath]
+        amap = "2:a"
     else:
         inputs = ["-i", base_p, "-i", strip, "-i", apath]
         amap = "2:a"
@@ -238,7 +242,7 @@ def make_verse_video(reciter, surah, a1, a2, style, solid=None, progress=None):
         raise VideoError("toolong", round(total))
 
     key = hashlib.sha1(
-        f"v3|{reciter}|{surah}|{a1}|{a2}|{style}|{solid}".encode()).hexdigest()[:16]
+        f"v4|{reciter}|{surah}|{a1}|{a2}|{style}|{solid}".encode()).hexdigest()[:16]
     final = os.path.join(CACHE, f"v_{key}.mp4")
     if os.path.exists(final) and os.path.getsize(final) > 10000:
         return final, total

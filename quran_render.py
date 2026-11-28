@@ -245,3 +245,144 @@ def particle_paths(style, solid, workdir):
         rp = os.path.join(workdir, "layer_rays.png")
         rays.save(rp)
     return fp, np_, rp
+
+
+# ---------- cinematic system (shorts style) ----------
+FONT_HAFS = os.path.join(BASE, "fonts", "UthmanicHafs.ttf")
+GOLD_HI = (238, 211, 89)      # karaoke highlight
+Y_HEADER = 138
+Y_CHUNK = 830
+Y_KARAOKE = 1430
+CHUNK_WORDS = 4
+CINE_MAX_W = 980
+
+
+def _halo(crop, strength=0.6, blur=7, dy=4):
+    """Soft dark halo behind a text crop."""
+    halo = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+    halo.putalpha(crop.getchannel("A").point(lambda v: int(v * strength)))
+    halo = halo.filter(ImageFilter.GaussianBlur(blur))
+    dark = Image.new("RGBA", crop.size, (5, 8, 16, 255))
+    dark.putalpha(halo.getchannel("A"))
+    canvas = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+    canvas.alpha_composite(dark, (0, dy))
+    canvas.alpha_composite(crop, (0, 0))
+    return canvas
+
+
+def _line_crop(tokens, font, fill, y_center, pad=34):
+    """One centered RTL line on a transparent frame; returns (crop, x0, y0)."""
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    space_w = d.textlength(" ", font=font, **_rtl)
+    line_w = sum(d.textlength(t, font=font, **_rtl) for t in tokens) + space_w * (len(tokens) - 1)
+    x_right = (W + line_w) / 2
+    line_h = int(font.size * 1.66)
+    y_top = y_center - line_h // 2
+    for tok in tokens:
+        d.text((x_right, y_top), tok, font=font, fill=fill, anchor="ra", **_rtl)
+        x_right -= d.textlength(tok, font=font, **_rtl) + space_w
+    bb = img.getbbox()
+    x0, y0 = max(0, bb[0] - pad), max(0, bb[1] - pad)
+    x1, y1 = min(W, bb[2] + pad), min(H, bb[3] + pad)
+    return img.crop((x0, y0, x1, y1)), x0, y0
+
+
+def _fit_size(probe, tokens, max_w, start=126, floor=80):
+    size = start
+    while size > floor:
+        font = _font(FONT_HAFS, size)
+        space_w = probe.textlength(" ", font=font, **_rtl)
+        if sum(probe.textlength(t, font=font, **_rtl) for t in tokens) + space_w * (len(tokens) - 1) <= max_w:
+            return font
+        size -= 4
+    return _font(FONT_HAFS, floor)
+
+
+def render_cine_header(surah, workdir, tag):
+    """Tiny plain surah label, top center. Returns (path, x, y)."""
+    font = _font(FONT_AMIRI, 48)
+    crop, x0, y0 = _line_crop([SURAHS[surah]["ar"]], font, (245, 240, 225, 225), Y_HEADER, pad=18)
+    p = os.path.join(workdir, f"hdr_{tag}.png")
+    crop.save(p)
+    return p, x0, y0
+
+
+def render_cine_overlays(surah, ayah, a1, dur, workdir, tag):
+    """Phrase-chunk verse text + karaoke current word, timed to the audio.
+
+    Returns list of window items: (png_path, x, y, t0, t1, fade_in, fade_out).
+    """
+    marker = f"﴿{ar_num(ayah)}﴾"
+    tokens = ayah_text(surah, ayah).split(" ")
+    has_bas = ayah == 1 and surah not in (1, 9)
+
+    probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+
+    # timing weights: basmala counts as one (slower) unit, marker shares the last word's slot
+    units = ([BASMALA] if has_bas else []) + tokens + [marker]
+    weights = [_letters(t) for t in units]
+    if has_bas:
+        weights[0] = int(weights[0] * 1.6)
+    weights[-1] = 1
+    total_w = sum(weights)
+    start, usable = 0.12, max(0.5, dur - 0.42)
+    times, acc = [], 0.0
+    for w_ in weights:
+        times.append(start + usable * acc / total_w)
+        acc += w_
+    ends = times[1:] + [start + usable]
+
+    # chunks of <=CHUNK_WORDS tokens that fit one line; marker rides the last chunk
+    chunks, cur = [], []
+    base_off = 1 if has_bas else 0
+    for tok in tokens:
+        trial = cur + [tok]
+        if len(trial) > CHUNK_WORDS:
+            chunks.append(cur)
+            cur = [tok]
+        else:
+            font = _fit_size(probe, trial, CINE_MAX_W)
+            if len(trial) > 1 and font.size <= 80 and _fit_size(probe, cur, CINE_MAX_W).size > 80:
+                chunks.append(cur)
+                cur = [tok]
+            else:
+                cur = trial
+    if cur:
+        chunks.append(cur)
+    chunks[-1] = chunks[-1] + [marker]
+    if has_bas:
+        chunks.insert(0, [BASMALA])
+
+    items = []
+    # token index of each chunk start (in `units` space)
+    idx = 0
+    for ci, chunk in enumerate(chunks):
+        t0 = times[idx]
+        t1 = ends[idx + len(chunk) - 1]
+        if ci + 1 < len(chunks):
+            t1 = times[idx + len(chunk)] + 0.05
+        else:
+            t1 = max(t1, dur - 0.12)
+        font = _fit_size(probe, chunk, CINE_MAX_W)
+        crop, x0, y0 = _line_crop(chunk, font, CREAM, Y_CHUNK)
+        crop = _halo(crop)
+        p = os.path.join(workdir, f"c_{tag}_{ci}.png")
+        crop.save(p)
+        items.append((p, x0, y0, round(max(0.0, t0 - 0.12), 3), round(t1, 3), 0.3, 0.22))
+        idx += len(chunk)
+
+    # karaoke: every ayah word (skip basmala unit and the ﴿N﴾ marker)
+    k_indices = range(base_off, len(units) - 1)
+    for ki, ui in enumerate(k_indices):
+        tok = units[ui]
+        font = _fit_size(probe, [tok], CINE_MAX_W, start=148, floor=108)
+        crop, x0, y0 = _line_crop([tok], font, GOLD_HI, Y_KARAOKE)
+        crop = _halo(crop, strength=0.5)
+        p = os.path.join(workdir, f"k_{tag}_{ki}.png")
+        crop.save(p)
+        k_end = ends[ui] + 0.05
+        if ui == len(units) - 2:
+            k_end = max(k_end, dur - 0.12)
+        items.append((p, x0, y0, round(times[ui], 3), round(k_end, 3), 0.08, 0.08))
+    return items
