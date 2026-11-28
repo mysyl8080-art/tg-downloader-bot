@@ -79,7 +79,10 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass  # stale callback after a cold start; still handle the tap
     try:
         kind, qual, key = q.data.split("|")
     except ValueError:
@@ -186,7 +189,8 @@ def main():
                 log.info("selfcheck GET /tg: %s", e)
         threading.Thread(target=selfcheck, daemon=True).start()
         app.run_webhook(listen="0.0.0.0", port=port, url_path="tg", webhook_url=url.rstrip("/") + "/tg",
-                        secret_token=secret, allowed_updates=["message", "callback_query"])
+                        secret_token=secret, allowed_updates=["message", "callback_query"],
+                        drop_pending_updates=True)
     else:
         log.info("bot starting (long polling)")
         app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])

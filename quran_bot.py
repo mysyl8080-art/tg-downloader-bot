@@ -97,7 +97,10 @@ async def _ask_ref(q, cfg):
 
 async def quran_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass  # stale callback after a cold start; still handle the tap
     data = q.data or ""
     cfg = _qv(ctx)
 
