@@ -5,4 +5,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py downloader.py quran_*.py quran_uthmani.json ./
 COPY fonts ./fonts/
+COPY assets ./assets/
 CMD ["python", "bot.py"]

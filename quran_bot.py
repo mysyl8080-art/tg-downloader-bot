@@ -295,7 +295,7 @@ async def quran_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 async def _generate(message, bot, cfg, surah, a1, a2):
-    status = await update.message.reply_text(
+    status = await message.reply_text(
         "⏳ جاري تحميل التلاوة وتصميم الفيديو... قد يستغرق حوالي دقيقة.")
     await bot.send_chat_action(message.chat_id, ChatAction.RECORD_VIDEO)
     async with _gen_sem:
