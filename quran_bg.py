@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFilter
 W, H = 1080, 1920
 DRIFT = 480  # extra width on particle layers so they can travel
 
-GOLD = (212, 175, 55)
+GOLD = (201, 162, 39)   # spec #C9A227
 GOLD_SOFT = (190, 158, 92)
 
 

@@ -2,7 +2,7 @@
 import os
 import unicodedata
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from quran_bg import W, H, GOLD, GOLD_SOFT, make_layers
 from quran_meta import BASMALA, SURAHS, ar_num, ayah_text
@@ -12,7 +12,7 @@ FONT_QURAN = os.path.join(BASE, "fonts", "AmiriQuran-Regular.ttf")
 FONT_AMIRI = os.path.join(BASE, "fonts", "Amiri-Regular.ttf")
 FONT_AMIRI_B = os.path.join(BASE, "fonts", "Amiri-Bold.ttf")
 
-CREAM = (248, 244, 233)
+CREAM = (245, 240, 225)   # spec #F5F0E1
 DARK_TEXT = (56, 46, 32)
 DARK_GOLD = (140, 110, 58)
 
@@ -39,7 +39,7 @@ def _wrap(draw, tokens, font, max_w):
     for tok in tokens:
         w_ = draw.textlength(tok, font=font, **_rtl)
         add = w_ + (space_w if cur else 0)
-        if cur and cur_w + add > max_w:
+        if cur and (cur_w + add > max_w or len(cur) >= 7):
             lines.append(cur)
             cur, cur_w = [tok], w_
         else:
@@ -96,14 +96,7 @@ def layout_ayah(draw, text, dur):
     return font, placed
 
 
-def render_base(reciter_ar, surah, a1, a2, style, solid, out_path, minimal=False):
-    """Background + header + footer, without the verse words. minimal: verse only."""
-    base, _far, _near, _rays, light = make_layers(style, solid)
-    img = base.convert("RGB")
-    if minimal:
-        img.save(out_path)
-        return out_path, light
-    draw = ImageDraw.Draw(img, "RGBA")
+def _draw_furniture(draw, reciter_ar, surah, a1, a2, light):
     gold = DARK_GOLD if light else GOLD
     gold_soft = (120, 96, 50) if light else GOLD_SOFT
 
@@ -127,11 +120,37 @@ def render_base(reciter_ar, surah, a1, a2, style, solid, out_path, minimal=False
                   (cx - 11, Y_FOOT_DIV)], outline=gold + (190,), width=2)
     f_rec = _font(FONT_AMIRI, 46)
     draw.text((W // 2, Y_RECITER), f"الشيخ {reciter_ar}", font=f_rec, fill=gold_soft, anchor="mm", **_rtl)
+
+
+def render_base(reciter_ar, surah, a1, a2, style, solid, out_path, minimal=False):
+    """Background + header + footer, without the verse words. minimal: verse only."""
+    base, _far, _near, _rays, light = make_layers(style, solid)
+    img = base.convert("RGB")
+    if minimal:
+        img.save(out_path)
+        return out_path, light
+    draw = ImageDraw.Draw(img, "RGBA")
+    _draw_furniture(draw, reciter_ar, surah, a1, a2, light)
     img.save(out_path)
     return out_path, light
 
 
-def render_word_overlays(surah, ayah, a1, dur, light, workdir, tag):
+def render_furniture(reciter_ar, surah, a1, a2, out_path):
+    """Transparent frame + header + footer layer for video backgrounds."""
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img, "RGBA")
+    gold = GOLD + (200,)
+    m1, m2 = 34, 46
+    d.rectangle([m1, m1, W - m1, H - m1], outline=gold, width=2)
+    d.rectangle([m2, m2, W - m2, H - m2], outline=gold, width=1)
+    for cx, cy in [(m1, m1), (W - m1, m1), (m1, H - m1), (W - m1, H - m1)]:
+        d.polygon([(cx, cy - 12), (cx + 12, cy), (cx, cy + 12), (cx - 12, cy)], outline=gold, width=2)
+    _draw_furniture(d, reciter_ar, surah, a1, a2, False)
+    img.save(out_path)
+    return out_path
+
+
+def render_word_overlays(surah, ayah, a1, dur, light, workdir, tag, shadow=False):
     """Render the basmala (if any) and each word as transparent crops.
 
     Returns list of (png_path, x, y, t_start, fade_dur).
@@ -192,12 +211,22 @@ def render_word_overlays(surah, ayah, a1, dur, light, workdir, tag):
         bb = draw.textbbox((W // 2, by), BASMALA, font=f_bas, anchor="ma", **_rtl)
         boxes.insert(0, (bb, 0.05))
 
-    pad = 14
+    pad = 26 if shadow else 14
     for i, (bb, t) in enumerate(boxes):
         x0, y0, x1, y1 = (int(round(v)) for v in bb)
         x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
         x1, y1 = min(W, x1 + pad), min(H, y1 + pad)
         crop = full.crop((x0, y0, x1, y1))
+        if shadow:
+            halo = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+            halo.putalpha(crop.getchannel("A").point(lambda v: int(v * 0.55)))
+            halo = halo.filter(ImageFilter.GaussianBlur(6))
+            dark = Image.new("RGBA", crop.size, (6, 9, 18, 255))
+            dark.putalpha(halo.getchannel("A"))
+            canvas = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+            canvas.alpha_composite(dark, (0, 3))
+            canvas.alpha_composite(crop, (0, 0))
+            crop = canvas
         p = os.path.join(workdir, f"w_{tag}_{i}.png")
         crop.save(p)
         out.append((p, x0, y0, round(t, 3), 0.6 if (has_bas and i == 0) else 0.35))
